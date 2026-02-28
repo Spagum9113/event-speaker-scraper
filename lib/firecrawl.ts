@@ -256,31 +256,247 @@ export function filterLikelySessionUrls(urls: string[], maxPages: number): strin
   return selected;
 }
 
-function buildSpeakerDirectoryActions(): FirecrawlAction[] {
-  return [
-    { type: "wait", milliseconds: 2200 },
-    { type: "scroll", direction: "down" },
-    { type: "wait", milliseconds: 1000 },
-    {
-      type: "executeJavascript",
-      script: `
-        const selectors = [
-          "button[aria-label*='load more' i]",
-          "button[aria-label*='show more' i]",
-          "button[class*='load-more' i]",
-          "a[aria-label*='load more' i]"
-        ];
+function buildSpeakerDirectoryActions(
+  speakerPassIndex: number,
+  maxLoadMoreClicks: number,
+): FirecrawlAction[] {
+  const safePassIndex = Math.max(1, speakerPassIndex);
+  const safeMaxClicks = Math.max(1, maxLoadMoreClicks);
+  const scrollCount = Math.min(1 + safePassIndex, 4);
+  const preActionWaitMs = safePassIndex === 1 ? 2200 : 1400;
+  const actions: FirecrawlAction[] = [{ type: "wait", milliseconds: preActionWaitMs }];
+
+  for (let index = 0; index < scrollCount; index += 1) {
+    actions.push({ type: "scroll", direction: "down" });
+    actions.push({ type: "wait", milliseconds: 800 });
+  }
+
+  actions.push({
+    type: "executeJavascript",
+    script: `
+      const selectors = [
+        "button[aria-label*='load more' i]",
+        "button[aria-label*='show more' i]",
+        "button[class*='load-more' i]",
+        "a[aria-label*='load more' i]"
+      ];
+      let clicks = 0;
+      while (clicks < ${safeMaxClicks}) {
+        let clicked = false;
         for (const selector of selectors) {
           const el = document.querySelector(selector);
           if (el) {
             el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            clicked = true;
+            clicks += 1;
             break;
           }
         }
-      `,
+        if (!clicked) {
+          break;
+        }
+      }
+    `,
+  });
+
+  actions.push({ type: "wait", milliseconds: 1200 });
+  return actions;
+}
+
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  const rounded = Math.floor(value ?? fallback);
+  return rounded > 0 ? rounded : fallback;
+}
+
+function buildSpeakerDirectoryScrapeOptions(options: ScrapeStructuredPageOptions): {
+  speakerPassIndex: number;
+  maxLoadMoreClicks: number;
+} {
+  return {
+    speakerPassIndex: normalizePositiveInteger(options.speakerPassIndex, 1),
+    maxLoadMoreClicks: normalizePositiveInteger(options.maxLoadMoreClicks, 1),
+  };
+}
+
+function buildSpeakerDirectoryActionPlan(options: ScrapeStructuredPageOptions): FirecrawlAction[] {
+  const passOptions = buildSpeakerDirectoryScrapeOptions(options);
+  return buildSpeakerDirectoryActions(
+    passOptions.speakerPassIndex,
+    passOptions.maxLoadMoreClicks,
+  );
+}
+
+type ScrapeStructuredPageOptions = {
+  extractionMode?: FirecrawlExtractionMode;
+  speakerPassIndex?: number;
+  maxLoadMoreClicks?: number;
+};
+
+function buildSpeakerDirectoryMetadata(
+  metadata: Record<string, unknown> | undefined,
+  options: ScrapeStructuredPageOptions,
+): Record<string, unknown> {
+  const passOptions = buildSpeakerDirectoryScrapeOptions(options);
+  return {
+    ...(metadata ?? {}),
+    extractionMode: "speakerDirectory",
+    speakerPassIndex: passOptions.speakerPassIndex,
+    maxLoadMoreClicks: passOptions.maxLoadMoreClicks,
+  };
+}
+
+function buildSessionMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
+  return {
+    ...(metadata ?? {}),
+    extractionMode: "session",
+  };
+}
+
+// The request options are passed from route orchestration to progressively
+// increase interaction intensity for speaker-directory pages.
+function getScrapeActions(
+  extractionMode: FirecrawlExtractionMode,
+  options: ScrapeStructuredPageOptions,
+): FirecrawlAction[] | undefined {
+  if (extractionMode !== "speakerDirectory") {
+    return undefined;
+  }
+  return buildSpeakerDirectoryActionPlan(options);
+}
+
+// Keep this type declaration near exports for easy imports.
+type ScrapeRequestOptions = ScrapeStructuredPageOptions;
+
+function getScrapeTimeoutMs(extractionMode: FirecrawlExtractionMode): number {
+  return extractionMode === "speakerDirectory"
+    ? SPEAKER_DIRECTORY_SCRAPE_TIMEOUT_MS
+    : DEFAULT_SCRAPE_TIMEOUT_MS;
+}
+
+function buildDebugMetadata(
+  extractionMode: FirecrawlExtractionMode,
+  options: ScrapeRequestOptions,
+  metadata: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  return extractionMode === "speakerDirectory"
+    ? buildSpeakerDirectoryMetadata(metadata, options)
+    : buildSessionMetadata(metadata);
+}
+
+function buildActions(
+  extractionMode: FirecrawlExtractionMode,
+  options: ScrapeRequestOptions,
+): FirecrawlAction[] | undefined {
+  return getScrapeActions(extractionMode, options);
+}
+
+function normalizeScrapeOptions(
+  options?: ScrapeStructuredPageOptions,
+): ScrapeRequestOptions {
+  return {
+    extractionMode: options?.extractionMode,
+    speakerPassIndex: options?.speakerPassIndex,
+    maxLoadMoreClicks: options?.maxLoadMoreClicks,
+  };
+}
+
+function getExtractionMode(options: ScrapeRequestOptions): FirecrawlExtractionMode {
+  return options.extractionMode ?? "session";
+}
+
+function getOnlyMainContent(extractionMode: FirecrawlExtractionMode): boolean {
+  return extractionMode !== "speakerDirectory";
+}
+
+function normalizeResponseMetadata(
+  metadata: unknown,
+): Record<string, unknown> | undefined {
+  return metadata && typeof metadata === "object"
+    ? (metadata as Record<string, unknown>)
+    : undefined;
+}
+
+function normalizeStructuredOutput(
+  extractionMode: FirecrawlExtractionMode,
+  extractedJson: unknown,
+  pageUrl: string,
+): {
+  sessions: SessionExtractedRow[];
+  appearances: SpeakerAppearanceExtractedRow[];
+} {
+  return extractionMode === "speakerDirectory"
+    ? toSpeakerDirectoryRows(parseStructuredSpeakers(extractedJson), pageUrl)
+    : toSessionAndAppearances(parseStructuredSessions(extractedJson, pageUrl), pageUrl);
+}
+
+function getPromptByMode(extractionMode: FirecrawlExtractionMode): string {
+  return extractionMode === "speakerDirectory"
+    ? "Extract all speakers visible on this page. Return an object with `speakers` array. Each speaker should include `name`, optional `organization`, optional `title`, optional `profileWebsiteUrl`, optional `profileUrl`, optional `websiteUrl`, optional `role`."
+    : "Extract conference sessions and the speakers listed for each session on this page. Return an object with `sessions` array. Each session must contain `title`, optional `url`, and `speakers` array. Each speaker item should include `name`, optional `organization`, optional `title`, optional `profileWebsiteUrl` (speaker website/profile page URL), optional `profileUrl`, optional `websiteUrl`, optional `role`.";
+}
+
+function getSchemaByMode(extractionMode: FirecrawlExtractionMode): Record<string, unknown> {
+  if (extractionMode === "speakerDirectory") {
+    return {
+      type: "object",
+      properties: {
+        speakers: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              organization: { type: "string" },
+              title: { type: "string" },
+              profileWebsiteUrl: { type: "string" },
+              profileUrl: { type: "string" },
+              websiteUrl: { type: "string" },
+              role: { type: "string" },
+            },
+            required: ["name"],
+          },
+        },
+      },
+      required: ["speakers"],
+    };
+  }
+
+  return {
+    type: "object",
+    properties: {
+      sessions: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            title: { type: "string" },
+            url: { type: "string" },
+            speakers: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string" },
+                  organization: { type: "string" },
+                  title: { type: "string" },
+                  profileWebsiteUrl: { type: "string" },
+                  profileUrl: { type: "string" },
+                  websiteUrl: { type: "string" },
+                  role: { type: "string" },
+                },
+                required: ["name"],
+              },
+            },
+          },
+          required: ["title"],
+        },
+      },
     },
-    { type: "wait", milliseconds: 1200 },
-  ];
+    required: ["sessions"],
+  };
 }
 
 function parseStructuredSessions(payload: unknown, pageUrl: string): ScrapedSessionModel[] {
@@ -447,10 +663,6 @@ function toSpeakerDirectoryRows(
   return { sessions, appearances };
 }
 
-type ScrapeStructuredPageOptions = {
-  extractionMode?: FirecrawlExtractionMode;
-};
-
 export async function scrapeStructuredSessionPage(
   pageUrl: string,
   signal?: AbortSignal,
@@ -461,11 +673,9 @@ export async function scrapeStructuredSessionPage(
   debugArtifact: ScrapeDebugArtifact;
 }> {
   const apiKey = getFirecrawlApiKey();
-  const extractionMode = options?.extractionMode ?? "session";
-  const isSpeakerDirectoryMode = extractionMode === "speakerDirectory";
-  const scrapeTimeoutMs = isSpeakerDirectoryMode
-    ? SPEAKER_DIRECTORY_SCRAPE_TIMEOUT_MS
-    : DEFAULT_SCRAPE_TIMEOUT_MS;
+  const requestOptions = normalizeScrapeOptions(options);
+  const extractionMode = getExtractionMode(requestOptions);
+  const scrapeTimeoutMs = getScrapeTimeoutMs(extractionMode);
 
   const response = await fetch("https://api.firecrawl.dev/v1/scrape", {
     method: "POST",
@@ -475,68 +685,12 @@ export async function scrapeStructuredSessionPage(
     },
     body: JSON.stringify({
       url: pageUrl,
-      onlyMainContent: !isSpeakerDirectoryMode,
+      onlyMainContent: getOnlyMainContent(extractionMode),
       formats: ["json", "markdown", "html"],
-      actions: isSpeakerDirectoryMode ? buildSpeakerDirectoryActions() : undefined,
+      actions: buildActions(extractionMode, requestOptions),
       jsonOptions: {
-        prompt:
-          isSpeakerDirectoryMode
-            ? "Extract all speakers visible on this page. Return an object with `speakers` array. Each speaker should include `name`, optional `organization`, optional `title`, optional `profileWebsiteUrl`, optional `profileUrl`, optional `websiteUrl`, optional `role`."
-            : "Extract conference sessions and the speakers listed for each session on this page. Return an object with `sessions` array. Each session must contain `title`, optional `url`, and `speakers` array. Each speaker item should include `name`, optional `organization`, optional `title`, optional `profileWebsiteUrl` (speaker website/profile page URL), optional `profileUrl`, optional `websiteUrl`, optional `role`.",
-        schema: {
-          type: "object",
-          properties: {
-            ...(isSpeakerDirectoryMode
-              ? {
-                  speakers: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        name: { type: "string" },
-                        organization: { type: "string" },
-                        title: { type: "string" },
-                        profileWebsiteUrl: { type: "string" },
-                        profileUrl: { type: "string" },
-                        websiteUrl: { type: "string" },
-                        role: { type: "string" },
-                      },
-                      required: ["name"],
-                    },
-                  },
-                }
-              : {
-                  sessions: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        title: { type: "string" },
-                        url: { type: "string" },
-                        speakers: {
-                          type: "array",
-                          items: {
-                            type: "object",
-                            properties: {
-                              name: { type: "string" },
-                              organization: { type: "string" },
-                              title: { type: "string" },
-                              profileWebsiteUrl: { type: "string" },
-                              profileUrl: { type: "string" },
-                              websiteUrl: { type: "string" },
-                              role: { type: "string" },
-                            },
-                            required: ["name"],
-                          },
-                        },
-                      },
-                      required: ["title"],
-                    },
-                  },
-                }),
-          },
-          required: [isSpeakerDirectoryMode ? "speakers" : "sessions"],
-        },
+        prompt: getPromptByMode(extractionMode),
+        schema: getSchemaByMode(extractionMode),
       },
       timeout: scrapeTimeoutMs,
     }),
@@ -553,13 +707,8 @@ export async function scrapeStructuredSessionPage(
   const extractedJson = payload.data?.json;
   const markdown = normalizeTextValue(payload.data?.markdown);
   const html = normalizeTextValue(payload.data?.html);
-  const metadata =
-    payload.data?.metadata && typeof payload.data.metadata === "object"
-      ? (payload.data.metadata as Record<string, unknown>)
-      : undefined;
-  const normalized = isSpeakerDirectoryMode
-    ? toSpeakerDirectoryRows(parseStructuredSpeakers(extractedJson), pageUrl)
-    : toSessionAndAppearances(parseStructuredSessions(extractedJson, pageUrl), pageUrl);
+  const metadata = normalizeResponseMetadata(payload.data?.metadata);
+  const normalized = normalizeStructuredOutput(extractionMode, extractedJson, pageUrl);
 
   return {
     ...normalized,
@@ -571,10 +720,7 @@ export async function scrapeStructuredSessionPage(
       extractionMode,
       markdown,
       html,
-      metadata: {
-        ...(metadata ?? {}),
-        extractionMode,
-      },
+      metadata: buildDebugMetadata(extractionMode, requestOptions, metadata),
     },
   };
 }

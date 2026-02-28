@@ -24,6 +24,10 @@ type MapRequestBody = {
 };
 
 const MAX_SESSION_PAGES = 20;
+const MAX_SPEAKER_PASSES = 8;
+const MAX_SPEAKER_PASS_FAILURES = 2;
+const SPEAKER_NO_GROWTH_STOP_PASSES = 2;
+const MIN_PASSES_BEFORE_PLATEAU_STOP = 4;
 const SPEAKER_PATH_KEYWORDS = ["speaker", "speakers", "presenter", "presenters", "faculty"];
 const SESSION_PATH_KEYWORDS = ["session", "sessions", "agenda", "schedule", "program"];
 const SPEAKER_SIGNAL_TOKENS = ["speaker", "speakers", "presenter", "presenters", "faculty"];
@@ -64,6 +68,26 @@ function hasSpeakerSignals(artifact: ScrapeDebugArtifact): boolean {
     (token) =>
       markdown.includes(token) || html.includes(token) || extractedJsonText.includes(token),
   );
+}
+
+function normalizeIdentityToken(value: string | undefined): string {
+  return (value ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function speakerAppearanceKey(row: SpeakerAppearanceExtractedRow): string {
+  const profile = row.profileUrl?.trim().toLowerCase();
+  if (profile) {
+    return `profile::${profile}`;
+  }
+  const name = normalizeIdentityToken(row.name);
+  const org = normalizeIdentityToken(row.organization);
+  return `nameorg::${name}::${org}`;
 }
 
 export async function POST(request: Request) {
@@ -161,31 +185,137 @@ export async function POST(request: Request) {
         appendLogLine(
           `Mode selected for ${sessionUrl}: ${modeSelection.mode}${modeSelection.isAmbiguous ? " (ambiguous)" : ""}.`,
         );
-        const firstPass = await scrapeStructuredSessionPage(sessionUrl, request.signal, {
-          extractionMode: modeSelection.mode,
-        });
-        scrapeArtifacts.push(firstPass.debugArtifact);
+        const shouldRunSpeakerPassLoop =
+          modeSelection.mode === "speakerDirectory" ||
+          (modeSelection.isAmbiguous && modeSelection.mode === "session");
 
-        let chosenResult = firstPass;
-        if (
-          modeSelection.isAmbiguous &&
-          modeSelection.mode === "session" &&
-          firstPass.appearances.length === 0 &&
-          hasSpeakerSignals(firstPass.debugArtifact)
-        ) {
-          appendLogLine(`Retrying ${sessionUrl} with speakerDirectory mode.`);
-          const retryPass = await scrapeStructuredSessionPage(sessionUrl, request.signal, {
-            extractionMode: "speakerDirectory",
+        if (!shouldRunSpeakerPassLoop) {
+          const singlePass = await scrapeStructuredSessionPage(sessionUrl, request.signal, {
+            extractionMode: "session",
           });
-          scrapeArtifacts.push(retryPass.debugArtifact);
-          if (retryPass.appearances.length > 0) {
-            chosenResult = retryPass;
+          scrapeArtifacts.push(singlePass.debugArtifact);
+          processedUrls.push(sessionUrl);
+          extractedSessions.push(...singlePass.sessions);
+          extractedAppearances.push(...singlePass.appearances);
+          appendLogLine(
+            `Processed page ${processedUrls.length}/${targetedSessionUrls.length}: ${sessionUrl}`,
+          );
+          continue;
+        }
+
+        const speakerLoopMode: FirecrawlExtractionMode =
+          modeSelection.mode === "speakerDirectory" ? "speakerDirectory" : "session";
+        const uniqueAppearanceMap = new Map<string, SpeakerAppearanceExtractedRow>();
+        const sessionRowsByUrl = new Map<string, SessionExtractedRow>();
+        let consecutiveNoGrowthPasses = 0;
+        let failedPasses = 0;
+        let stopReason = "max_passes_reached";
+        let shouldEnterSpeakerMode = speakerLoopMode === "speakerDirectory";
+
+        for (let passIndex = 1; passIndex <= MAX_SPEAKER_PASSES; passIndex += 1) {
+          if (request.signal.aborted) {
+            throw new Error("Extraction cancelled.");
+          }
+
+          const passMode: FirecrawlExtractionMode =
+            shouldEnterSpeakerMode || passIndex > 1 ? "speakerDirectory" : "session";
+          appendLogLine(`Pass ${passIndex} (${passMode}) started for ${sessionUrl}.`);
+
+          try {
+            const passResult = await scrapeStructuredSessionPage(sessionUrl, request.signal, {
+              extractionMode: passMode,
+              speakerPassIndex: passIndex,
+              maxLoadMoreClicks: Math.min(1 + passIndex, 4),
+            });
+            const debugArtifact: ScrapeDebugArtifact = {
+              ...passResult.debugArtifact,
+              metadata: {
+                ...(passResult.debugArtifact.metadata ?? {}),
+                passIndex,
+                extractionMode: passMode,
+              },
+            };
+            scrapeArtifacts.push(debugArtifact);
+
+            if (!shouldEnterSpeakerMode) {
+              if (
+                passMode === "session" &&
+                passResult.appearances.length === 0 &&
+                hasSpeakerSignals(passResult.debugArtifact)
+              ) {
+                appendLogLine(
+                  `Pass ${passIndex}: speaker signals detected; switching to speakerDirectory mode.`,
+                );
+                shouldEnterSpeakerMode = true;
+                continue;
+              }
+              shouldEnterSpeakerMode = passMode === "speakerDirectory";
+            }
+
+            for (const sessionRow of passResult.sessions) {
+              if (!sessionRowsByUrl.has(sessionRow.url)) {
+                sessionRowsByUrl.set(sessionRow.url, sessionRow);
+              }
+            }
+
+            const beforeUniqueCount = uniqueAppearanceMap.size;
+            for (const appearance of passResult.appearances) {
+              const key = speakerAppearanceKey(appearance);
+              if (!uniqueAppearanceMap.has(key)) {
+                uniqueAppearanceMap.set(key, appearance);
+              }
+            }
+            const newSpeakersThisPass = uniqueAppearanceMap.size - beforeUniqueCount;
+            appendLogLine(
+              `Pass ${passIndex}: extracted=${passResult.appearances.length}, new=${newSpeakersThisPass}, cumulative=${uniqueAppearanceMap.size}.`,
+            );
+
+            if (newSpeakersThisPass === 0) {
+              consecutiveNoGrowthPasses += 1;
+            } else {
+              consecutiveNoGrowthPasses = 0;
+            }
+
+            const reachedPlateauThreshold =
+              passIndex >= MIN_PASSES_BEFORE_PLATEAU_STOP &&
+              uniqueAppearanceMap.size > 0 &&
+              consecutiveNoGrowthPasses >= SPEAKER_NO_GROWTH_STOP_PASSES;
+
+            if (reachedPlateauThreshold) {
+              stopReason = "plateau_no_growth";
+              break;
+            }
+          } catch (passError) {
+            failedPasses += 1;
+            const message =
+              passError instanceof Error ? passError.message : "Unknown scrape pass error.";
+            scrapeArtifacts.push({
+              url: sessionUrl,
+              success: false,
+              rawPayload: null,
+              extractedJson: null,
+              extractionMode: passMode,
+              metadata: {
+                extractionMode: passMode,
+                ambiguousModeSelection: modeSelection.isAmbiguous,
+                passIndex,
+              },
+              error: message,
+            });
+            appendLogLine(`Pass ${passIndex} failed for ${sessionUrl}: ${message}`);
+            if (failedPasses >= MAX_SPEAKER_PASS_FAILURES) {
+              stopReason = "max_pass_failures";
+              break;
+            }
           }
         }
 
         processedUrls.push(sessionUrl);
-        extractedSessions.push(...chosenResult.sessions);
-        extractedAppearances.push(...chosenResult.appearances);
+        extractedSessions.push(...Array.from(sessionRowsByUrl.values()));
+        extractedAppearances.push(...Array.from(uniqueAppearanceMap.values()));
+        appendLogLine(
+          `Speaker pass loop ended for ${sessionUrl}: ${stopReason}, unique speakers=${uniqueAppearanceMap.size}.`,
+        );
         appendLogLine(`Processed page ${processedUrls.length}/${targetedSessionUrls.length}: ${sessionUrl}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown scrape error.";
