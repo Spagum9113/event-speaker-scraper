@@ -261,10 +261,10 @@ export default function EventsPage() {
               events.map((eventRecord) => (
                 <tr
                   key={eventRecord.id}
-                  onDoubleClick={() => router.push(`/events/${eventRecord.id}`)}
+                  onClick={() => router.push(`/events/${eventRecord.id}`)}
                   className="cursor-pointer border-t border-zinc-200"
                 >
-                  <td className="p-3" onDoubleClick={(event) => event.stopPropagation()}>
+                  <td className="p-3" onClick={(event) => event.stopPropagation()}>
                     <input
                       type="checkbox"
                       aria-label={`Select ${eventRecord.name}`}
@@ -288,7 +288,7 @@ export default function EventsPage() {
                   </td>
                   <td
                     className="p-3 text-right"
-                    onDoubleClick={(event) => event.stopPropagation()}
+                    onClick={(event) => event.stopPropagation()}
                   >
                     <div className="relative inline-block text-left">
                       <button
