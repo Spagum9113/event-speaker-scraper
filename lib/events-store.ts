@@ -48,6 +48,7 @@ export function buildMockExtractionResult(previousLogLines: string[]): EventJob 
   return {
     status: "complete",
     counters: {
+      totalUrlsMapped: 42,
       urlsDiscovered: 42,
       pagesProcessed: 18,
       sessionsFound: 12,
@@ -61,6 +62,9 @@ export function buildMockExtractionResult(previousLogLines: string[]): EventJob 
       `[${timestamp}] Speaker extraction complete`,
       `[${timestamp}] Saved event results`,
     ].slice(-20),
+    mappedUrls: [],
+    filteredUrls: [],
+    processedUrls: [],
     updatedAt: nowIso(),
   };
 }

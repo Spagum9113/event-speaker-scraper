@@ -29,15 +29,24 @@ create table if not exists jobs (
   id uuid primary key default gen_random_uuid(),
   event_id uuid not null references events(id) on delete cascade,
   status job_status not null default 'queued',
+  total_urls_mapped integer not null default 0,
   urls_discovered integer not null default 0,
   pages_processed integer not null default 0,
   sessions_found integer not null default 0,
   speaker_appearances_found integer not null default 0,
   unique_speakers_found integer not null default 0,
   log jsonb not null default '[]'::jsonb,
+  mapped_urls jsonb not null default '[]'::jsonb,
+  filtered_urls jsonb not null default '[]'::jsonb,
+  processed_urls jsonb not null default '[]'::jsonb,
   error text,
   created_at timestamptz not null default now()
 );
+
+alter table jobs add column if not exists total_urls_mapped integer not null default 0;
+alter table jobs add column if not exists mapped_urls jsonb not null default '[]'::jsonb;
+alter table jobs add column if not exists filtered_urls jsonb not null default '[]'::jsonb;
+alter table jobs add column if not exists processed_urls jsonb not null default '[]'::jsonb;
 
 create table if not exists sessions (
   id uuid primary key default gen_random_uuid(),

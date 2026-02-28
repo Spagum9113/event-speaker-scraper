@@ -7,6 +7,7 @@ export type JobStatus =
   | "failed";
 
 export type JobCounters = {
+  totalUrlsMapped: number;
   urlsDiscovered: number;
   pagesProcessed: number;
   sessionsFound: number;
@@ -26,6 +27,9 @@ export type EventJob = {
   status: JobStatus;
   counters: JobCounters;
   logLines: string[];
+  mappedUrls: string[];
+  filteredUrls: string[];
+  processedUrls: string[];
   updatedAt: string;
 };
 

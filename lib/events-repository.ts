@@ -12,12 +12,16 @@ type DbJob = {
   id: string;
   event_id: string;
   status: JobStatus;
+  total_urls_mapped: number;
   urls_discovered: number;
   pages_processed: number;
   sessions_found: number;
   speaker_appearances_found: number;
   unique_speakers_found: number;
   log: unknown;
+  mapped_urls: unknown;
+  filtered_urls: unknown;
+  processed_urls: unknown;
   error: string | null;
   created_at: string;
 };
@@ -31,6 +35,7 @@ type DbSpeakerWithOrg = {
 };
 
 const EMPTY_COUNTERS: JobCounters = {
+  totalUrlsMapped: 0,
   urlsDiscovered: 0,
   pagesProcessed: 0,
   sessionsFound: 0,
@@ -47,6 +52,9 @@ export function defaultJob(status: JobStatus = "queued"): EventJob {
     status,
     counters: EMPTY_COUNTERS,
     logLines: ["Waiting for first extraction run."],
+    mappedUrls: [],
+    filteredUrls: [],
+    processedUrls: [],
     updatedAt: nowIso(),
   };
 }
@@ -61,6 +69,14 @@ function parseLogLines(rawLog: unknown): string[] {
   );
 }
 
+function parseUrlList(rawList: unknown): string[] {
+  if (!Array.isArray(rawList)) {
+    return [];
+  }
+
+  return rawList.filter((entry): entry is string => typeof entry === "string");
+}
+
 function toEventJob(row: DbJob | null): EventJob {
   if (!row) {
     return defaultJob("queued");
@@ -69,6 +85,7 @@ function toEventJob(row: DbJob | null): EventJob {
   return {
     status: row.status,
     counters: {
+      totalUrlsMapped: row.total_urls_mapped,
       urlsDiscovered: row.urls_discovered,
       pagesProcessed: row.pages_processed,
       sessionsFound: row.sessions_found,
@@ -76,6 +93,9 @@ function toEventJob(row: DbJob | null): EventJob {
       uniqueSpeakersFound: row.unique_speakers_found,
     },
     logLines: parseLogLines(row.log),
+    mappedUrls: parseUrlList(row.mapped_urls),
+    filteredUrls: parseUrlList(row.filtered_urls),
+    processedUrls: parseUrlList(row.processed_urls),
     updatedAt: row.created_at,
   };
 }
@@ -129,7 +149,7 @@ async function getLatestJobsByEventIds(eventIds: string[]): Promise<Map<string, 
   const { data, error } = await supabase
     .from("jobs")
     .select(
-      "id, event_id, status, urls_discovered, pages_processed, sessions_found, speaker_appearances_found, unique_speakers_found, log, error, created_at",
+      "id, event_id, status, total_urls_mapped, urls_discovered, pages_processed, sessions_found, speaker_appearances_found, unique_speakers_found, log, mapped_urls, filtered_urls, processed_urls, error, created_at",
     )
     .in("event_id", eventIds)
     .order("created_at", { ascending: false });
@@ -183,7 +203,7 @@ export async function getEventByIdFromDb(id: string): Promise<EventRecord | null
   const { data: latestJobData, error: latestJobError } = await supabase
     .from("jobs")
     .select(
-      "id, event_id, status, urls_discovered, pages_processed, sessions_found, speaker_appearances_found, unique_speakers_found, log, error, created_at",
+      "id, event_id, status, total_urls_mapped, urls_discovered, pages_processed, sessions_found, speaker_appearances_found, unique_speakers_found, log, mapped_urls, filtered_urls, processed_urls, error, created_at",
     )
     .eq("event_id", id)
     .order("created_at", { ascending: false })
@@ -275,12 +295,16 @@ export async function appendJobToEventInDb(
   const { error } = await supabase.from("jobs").insert({
     event_id: eventId,
     status: job.status,
+    total_urls_mapped: job.counters.totalUrlsMapped,
     urls_discovered: job.counters.urlsDiscovered,
     pages_processed: job.counters.pagesProcessed,
     sessions_found: job.counters.sessionsFound,
     speaker_appearances_found: job.counters.speakerAppearancesFound,
     unique_speakers_found: job.counters.uniqueSpeakersFound,
     log: job.logLines,
+    mapped_urls: job.mappedUrls,
+    filtered_urls: job.filteredUrls,
+    processed_urls: job.processedUrls,
   });
 
   if (error) {

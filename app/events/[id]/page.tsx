@@ -2,13 +2,18 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
-import {
-  appendEventJob,
-  buildMockExtractionResult,
-  getEventById,
-} from "@/lib/events-store";
+import { useEffect, useRef, useState } from "react";
+import { appendEventJob, getEventById } from "@/lib/events-store";
 import { EventRecord } from "@/lib/types";
+
+type MappingPanelMode = "totalMapped" | "afterFilter" | "processed" | null;
+
+type MapApiResponse = {
+  totalMappedUrls: number;
+  mappedUrls: string[];
+  filteredUrls: string[];
+  error?: string;
+};
 
 function formatDate(isoDate: string): string {
   return new Date(isoDate).toLocaleString();
@@ -16,10 +21,12 @@ function formatDate(isoDate: string): string {
 
 export default function EventDetailPage() {
   const params = useParams<{ id: string }>();
+  const mappingAbortControllerRef = useRef<AbortController | null>(null);
   const [event, setEvent] = useState<EventRecord | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
+  const [panelMode, setPanelMode] = useState<MappingPanelMode>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -53,9 +60,18 @@ export default function EventDetailPage() {
     void loadEvent();
 
     return () => {
+      mappingAbortControllerRef.current?.abort();
       isMounted = false;
     };
   }, [params.id]);
+
+  function cancelExtraction(): void {
+    if (!isRunning) {
+      return;
+    }
+
+    mappingAbortControllerRef.current?.abort();
+  }
 
   async function runExtraction(): Promise<void> {
     if (!event || isRunning) {
@@ -91,24 +107,88 @@ export default function EventDetailPage() {
       return;
     }
 
-    window.setTimeout(async () => {
+    try {
+      const controller = new AbortController();
+      mappingAbortControllerRef.current = controller;
+      const response = await fetch("/api/extraction/map", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          eventId: event.id,
+          startUrl: event.url,
+        }),
+        signal: controller.signal,
+      });
+
+      const payload = (await response.json()) as MapApiResponse;
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Could not map event URLs.");
+      }
+
+      const completedAt = new Date().toLocaleTimeString();
       const completed: EventRecord = {
         ...inProgress,
-        latestJob: buildMockExtractionResult(inProgress.latestJob.logLines),
+        latestJob: {
+          status: "complete",
+          counters: {
+            totalUrlsMapped: payload.totalMappedUrls,
+            urlsDiscovered: payload.filteredUrls.length,
+            pagesProcessed: 0,
+            sessionsFound: 0,
+            speakerAppearancesFound: 0,
+            uniqueSpeakersFound: 0,
+          },
+          logLines: [
+            ...inProgress.latestJob.logLines.slice(-14),
+            `[${completedAt}] Firecrawl map completed (${payload.totalMappedUrls} total URLs).`,
+            `[${completedAt}] URLs after filter: ${payload.filteredUrls.length}.`,
+            `[${completedAt}] Pages processed remains 0 for Step 1.`,
+          ].slice(-20),
+          mappedUrls: payload.mappedUrls,
+          filteredUrls: payload.filteredUrls,
+          processedUrls: [],
+          updatedAt: new Date().toISOString(),
+        },
+      };
+
+      await appendEventJob(event.id, completed.latestJob);
+      const refreshed = await getEventById(event.id);
+      setEvent(refreshed ?? completed);
+      setPanelMode("afterFilter");
+    } catch (runError) {
+      const failedAt = new Date().toLocaleTimeString();
+      const isCanceled =
+        runError instanceof DOMException && runError.name === "AbortError";
+      const failedMessage = isCanceled
+        ? "Extraction was cancelled."
+        : runError instanceof Error
+          ? runError.message
+          : "Could not finalize extraction.";
+      const failed: EventRecord = {
+        ...inProgress,
+        latestJob: {
+          ...inProgress.latestJob,
+          status: "failed",
+          logLines: [
+            ...inProgress.latestJob.logLines.slice(-18),
+            `[${failedAt}] ${isCanceled ? "Mapping cancelled" : "Mapping failed"}: ${failedMessage}`,
+          ].slice(-20),
+          updatedAt: new Date().toISOString(),
+        },
       };
 
       try {
-        await appendEventJob(event.id, completed.latestJob);
-        const refreshed = await getEventById(event.id);
-        setEvent(refreshed ?? completed);
-      } catch (runError) {
-        setError(
-          runError instanceof Error ? runError.message : "Could not finalize extraction.",
-        );
+        await appendEventJob(event.id, failed.latestJob);
+      } catch {
+        // Keep UI stable even if persisting failed status fails.
       }
 
+      setEvent(failed);
+      setError(failedMessage);
+    } finally {
+      mappingAbortControllerRef.current = null;
       setIsRunning(false);
-    }, 1200);
+    }
   }
 
   if (isLoading) {
@@ -153,6 +233,15 @@ export default function EventDetailPage() {
           >
             {isRunning ? "Running..." : "Run Extraction"}
           </button>
+          {isRunning ? (
+            <button
+              type="button"
+              onClick={cancelExtraction}
+              className="rounded-md border border-red-300 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-100"
+            >
+              Cancel Run
+            </button>
+          ) : null}
           <span className="text-sm">
             Latest status:{" "}
             <span className="font-medium capitalize">{event.latestJob.status}</span>
@@ -163,14 +252,21 @@ export default function EventDetailPage() {
         </div>
         {error ? <p className="mb-3 text-sm text-red-600">{error}</p> : null}
 
-        <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 lg:grid-cols-5">
           <CounterCard
-            label="URLs discovered"
+            label="Total URLs mapped"
+            value={event.latestJob.counters.totalUrlsMapped}
+            onDoubleClick={() => setPanelMode("totalMapped")}
+          />
+          <CounterCard
+            label="URLs after filter"
             value={event.latestJob.counters.urlsDiscovered}
+            onDoubleClick={() => setPanelMode("afterFilter")}
           />
           <CounterCard
             label="Pages processed"
             value={event.latestJob.counters.pagesProcessed}
+            onDoubleClick={() => setPanelMode("processed")}
           />
           <CounterCard
             label="Conference sessions"
@@ -181,6 +277,15 @@ export default function EventDetailPage() {
             value={event.latestJob.counters.uniqueSpeakersFound}
           />
         </div>
+        {panelMode ? (
+          <UrlPanel
+            mode={panelMode}
+            mappedUrls={event.latestJob.mappedUrls}
+            filteredUrls={event.latestJob.filteredUrls}
+            processedUrls={event.latestJob.processedUrls}
+            onClose={() => setPanelMode(null)}
+          />
+        ) : null}
 
         <div className="mt-4">
           <h2 className="mb-2 text-sm font-semibold">Latest log lines</h2>
@@ -235,11 +340,86 @@ export default function EventDetailPage() {
   );
 }
 
-function CounterCard({ label, value }: { label: string; value: number }) {
+function CounterCard({
+  label,
+  value,
+  onDoubleClick,
+}: {
+  label: string;
+  value: number;
+  onDoubleClick?: () => void;
+}) {
   return (
-    <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+    <div
+      className="rounded-md border border-zinc-200 bg-zinc-50 p-3"
+      onDoubleClick={onDoubleClick}
+      role={onDoubleClick ? "button" : undefined}
+      tabIndex={onDoubleClick ? 0 : undefined}
+    >
       <p className="text-xs uppercase tracking-wide text-zinc-600">{label}</p>
       <p className="mt-1 text-lg font-semibold">{value}</p>
+    </div>
+  );
+}
+
+function UrlPanel({
+  mode,
+  mappedUrls,
+  filteredUrls,
+  processedUrls,
+  onClose,
+}: {
+  mode: NonNullable<MappingPanelMode>;
+  mappedUrls: string[];
+  filteredUrls: string[];
+  processedUrls: string[];
+  onClose: () => void;
+}) {
+  const config =
+    mode === "totalMapped"
+      ? {
+          title: "Total URLs mapped",
+          urls: mappedUrls,
+          emptyText: "No mapped URLs yet.",
+        }
+      : mode === "afterFilter"
+        ? {
+            title: "URLs after filter",
+            urls: filteredUrls,
+            emptyText: "No filtered URLs yet.",
+          }
+        : {
+            title: "Pages processed",
+            urls: processedUrls,
+            emptyText: "No processed pages yet.",
+          };
+
+  return (
+    <div className="mt-4 rounded-md border border-zinc-200 bg-white p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold">{config.title}</h3>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-xs text-zinc-600 hover:underline"
+        >
+          Close
+        </button>
+      </div>
+      <p className="mb-2 text-xs text-zinc-600">Total: {config.urls.length}</p>
+      <div className="max-h-52 overflow-auto rounded-md border bg-zinc-50 p-2">
+        {config.urls.length === 0 ? (
+          <p className="text-sm text-zinc-600">{config.emptyText}</p>
+        ) : (
+          <ul className="space-y-1 text-sm text-zinc-700">
+            {config.urls.map((url) => (
+              <li key={url} className="break-all">
+                {url}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }

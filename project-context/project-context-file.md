@@ -195,3 +195,12 @@ The CSV should match what I see in the UI.
 - Supabase is the source of truth; UI reads from Supabase
 - Use `jobs` table for progress tracking; UI polls job status while extraction runs
 - Prefer idempotent upserts to avoid duplicates on re-runs
+
+## Commenting Style (Easy Review)
+- Use short, plain-English comments so changes are easy to scan.
+- Keep comments to one line when possible.
+- Explain **why** a block exists, not obvious code behavior.
+- Add comments only for non-obvious logic (URL filtering, mapping transforms, error handling).
+- Use a consistent prefix for key logic notes: `// Step 1:`
+- Avoid noisy comments on simple assignments or JSX labels.
+- For API/DB mapping code, add one short comment above each conversion boundary (request parsing, filter rules, DB row <-> app model mapping).
