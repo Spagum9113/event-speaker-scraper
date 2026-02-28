@@ -1,0 +1,162 @@
+# Database Schema (Supabase / Postgres) — Conference Speaker Extractor (Phase 1)
+
+This schema supports:
+- Event history (named events you can return to later)
+- Extraction runs (jobs) with progress + logs
+- Sessions discovered on the conference site
+- Speakers + organizations (deduped)
+- Link table between sessions and speakers
+- Fast search/filter in the UI
+
+---
+
+## Tables
+
+### 1) `events`
+Stores one row per conference/event.
+
+**Columns**
+- `id` (uuid, PK)
+- `name` (text, required)
+- `start_url` (text, required)
+- `domain` (text, optional)
+- `created_at` (timestamptz)
+
+**Notes**
+- `name` exists primarily for history and later lookup.
+
+---
+
+### 2) `jobs`
+Stores one row per extraction run for an event (progress tracking + retries).
+
+**Columns**
+- `id` (uuid, PK)
+- `event_id` (uuid, FK → events.id, cascade delete)
+- `status` (enum: `queued | crawling | extracting | saving | complete | failed`)
+- `urls_discovered` (int, default 0)
+- `pages_processed` (int, default 0)
+- `sessions_found` (int, default 0)
+- `speaker_appearances_found` (int, default 0)
+- `unique_speakers_found` (int, default 0)
+- `log` (jsonb, default `[]`) — array of strings or objects
+- `error` (text, nullable)
+- `created_at` (timestamptz)
+
+**Notes**
+- The UI can poll this row to show live progress.
+- Multiple jobs per event are allowed (re-runs).
+
+---
+
+### 3) `sessions`
+Stores one row per session discovered for an event.
+
+**Columns**
+- `id` (uuid, PK)
+- `event_id` (uuid, FK → events.id, cascade delete)
+- `title` (text, required)
+- `url` (text, required)
+- `created_at` (timestamptz)
+
+**Constraints**
+- Unique: `(event_id, url)` — prevents duplicate sessions when re-running.
+
+---
+
+### 4) `organizations`
+Stores orgs referenced by speakers.
+
+**Columns**
+- `id` (uuid, PK)
+- `name` (text, required)
+- `normalized_name` (text, required)
+- `created_at` (timestamptz)
+
+**Constraints**
+- Unique: `normalized_name` (Phase 1 simple approach)
+
+**Notes**
+- Phase 2 can add `domain`, `size_bucket`, `bio`.
+
+---
+
+### 5) `speakers`
+Stores one row per unique speaker within an event.
+
+**Columns**
+- `id` (uuid, PK)
+- `event_id` (uuid, FK → events.id, cascade delete)
+- `canonical_name` (text, required)
+- `normalized_name` (text, required)
+- `organization_id` (uuid, FK → organizations.id, nullable, set null on delete)
+- `title` (text, nullable)
+- `profile_url` (text, nullable)
+- `created_at` (timestamptz)
+
+**Constraints**
+- Unique: `(event_id, profile_url)`  
+  - Only applies meaningfully when `profile_url` is present.
+  - Helps dedupe when sites provide a stable speaker profile page.
+
+**Notes**
+- Dedupe fallback (implemented in code): normalized name + normalized org (when no profile_url).
+
+---
+
+### 6) `session_speakers`
+Join table linking speakers to sessions (one speaker can be in many sessions).
+
+**Columns**
+- `session_id` (uuid, FK → sessions.id, cascade delete)
+- `speaker_id` (uuid, FK → speakers.id, cascade delete)
+- `role` (text, nullable) — e.g., speaker/moderator/panelist
+- `created_at` (timestamptz)
+
+**Constraints**
+- Primary key: `(session_id, speaker_id)` — prevents duplicate links.
+
+---
+
+## Indexing (for performance)
+
+Recommended indexes:
+- `events(created_at desc)`
+- `jobs(event_id, created_at desc)`
+- `sessions(event_id)`
+- `speakers(event_id)`
+- `speakers(organization_id)`
+- `organizations(normalized_name)`
+
+For fast fuzzy search in Phase 1 (optional):
+- enable `pg_trgm`
+- GIN trigram index on `speakers.canonical_name`
+- GIN trigram index on `organizations.name` (optional)
+
+---
+
+## Dedupe Rules (implemented in backend)
+Within an event:
+1) If `profile_url` exists: treat it as the primary identity  
+   - unique by `(event_id, profile_url)`
+2) Else: dedupe by `(event_id, normalized_name + normalized_org)`  
+   - normalized org is derived from organization name (string normalization)
+
+---
+
+## Phase 2 Extension (not in Phase 1 tables yet)
+Planned additions:
+- `speakers.linkedin_url`
+- `speakers.email`
+- `speakers.bio`
+- `organizations.domain`
+- `organizations.size_bucket`
+- `organizations.bio`
+
+---
+
+## Query Patterns (how the UI will use this)
+- Events history: `select * from events order by created_at desc`
+- Latest job per event: `select * from jobs where event_id = ? order by created_at desc limit 1`
+- Speakers table for an event (with org name): join speakers → organizations, plus appearance count via session_speakers
+- Speaker detail: speaker info + sessions via session_speakers → sessions
