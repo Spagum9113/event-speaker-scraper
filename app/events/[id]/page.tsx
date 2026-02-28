@@ -3,31 +3,50 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { appendEventJob, getEventById } from "@/lib/events-store";
+import { getEventById, startExtraction } from "@/lib/events-store";
 import { EventRecord } from "@/lib/types";
 
-type MappingPanelMode = "totalMapped" | "afterFilter" | "processed" | null;
+type MappingPanelMode =
+  | "totalMapped"
+  | "afterFilter"
+  | "processed"
+  | "conferenceSessions"
+  | "uniqueSpeakers"
+  | null;
 
-type MapApiResponse = {
-  totalMappedUrls: number;
-  mappedUrls: string[];
-  filteredUrls: string[];
-  error?: string;
-};
+const TERMINAL_STATUSES = new Set(["complete", "failed"]);
 
 function formatDate(isoDate: string): string {
   return new Date(isoDate).toLocaleString();
 }
 
+function formatDuration(totalSeconds: number): string {
+  const safeSeconds = Math.max(0, totalSeconds);
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const seconds = safeSeconds % 60;
+
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(
+      seconds,
+    ).padStart(2, "0")}`;
+  }
+
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 export default function EventDetailPage() {
   const params = useParams<{ id: string }>();
-  // Step 1: Keep a handle to cancel the in-flight map request from UI.
-  const mappingAbortControllerRef = useRef<AbortController | null>(null);
+  // Step 2: Keep handle to the background extraction call for error reporting only.
+  const activeRunPromiseRef = useRef<Promise<void> | null>(null);
   const [event, setEvent] = useState<EventRecord | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [panelMode, setPanelMode] = useState<MappingPanelMode>(null);
+  const [runStartedAtMs, setRunStartedAtMs] = useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [lastRunDurationSeconds, setLastRunDurationSeconds] = useState<number | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -61,17 +80,69 @@ export default function EventDetailPage() {
     void loadEvent();
 
     return () => {
-      mappingAbortControllerRef.current?.abort();
+      activeRunPromiseRef.current = null;
       isMounted = false;
     };
   }, [params.id]);
+
+  useEffect(() => {
+    if (!isRunning || runStartedAtMs === null) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - runStartedAtMs) / 1000));
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, [isRunning, runStartedAtMs]);
+
+  useEffect(() => {
+    if (!isRunning || !event?.id) {
+      return;
+    }
+
+    const eventId = event.id;
+    let isMounted = true;
+    async function pollLatestEvent() {
+      try {
+        const refreshed = await getEventById(eventId);
+        if (!isMounted || !refreshed) {
+          return;
+        }
+
+        setEvent(refreshed);
+        if (TERMINAL_STATUSES.has(refreshed.latestJob.status)) {
+          setIsRunning(false);
+          if (runStartedAtMs) {
+            setLastRunDurationSeconds(Math.floor((Date.now() - runStartedAtMs) / 1000));
+          }
+          setRunStartedAtMs(null);
+        }
+      } catch {
+        // Step 2: Ignore transient polling errors so a single failure does not stop live updates.
+      }
+    }
+
+    void pollLatestEvent();
+    const interval = window.setInterval(() => {
+      void pollLatestEvent();
+    }, 2500);
+
+    return () => {
+      isMounted = false;
+      window.clearInterval(interval);
+    };
+  }, [event?.id, isRunning, runStartedAtMs]);
 
   function cancelExtraction(): void {
     if (!isRunning) {
       return;
     }
 
-    mappingAbortControllerRef.current?.abort();
+    setIsRunning(false);
+    setRunStartedAtMs(null);
+    setError("Stopped local polling. Extraction may still be running on the server.");
   }
 
   async function runExtraction(): Promise<void> {
@@ -79,16 +150,19 @@ export default function EventDetailPage() {
       return;
     }
 
+    const startedAtMs = Date.now();
+    setRunStartedAtMs(startedAtMs);
+    setElapsedSeconds(0);
     setIsRunning(true);
     setError("");
     const startedAt = new Date().toLocaleTimeString();
 
-    // Step 1: Write an immediate "crawling" job snapshot so UI updates instantly.
+    // Step 2: Optimistically show queued state until polling picks up persisted job rows.
     const inProgress: EventRecord = {
       ...event,
       latestJob: {
         ...event.latestJob,
-        status: "crawling",
+        status: "queued",
         updatedAt: new Date().toISOString(),
         logLines: [
           ...event.latestJob.logLines.slice(-19),
@@ -97,101 +171,21 @@ export default function EventDetailPage() {
       },
     };
 
-    try {
-      await appendEventJob(event.id, inProgress.latestJob);
-      setEvent(inProgress);
-    } catch (runError) {
+    setEvent(inProgress);
+    const runPromise = startExtraction(event.id, event.url);
+    activeRunPromiseRef.current = runPromise;
+    void runPromise.catch((runError) => {
       setError(
         runError instanceof Error ? runError.message : "Could not start extraction.",
       );
       setIsRunning(false);
-      return;
-    }
-
-    try {
-      // Step 1: Each run gets its own cancel token.
-      const controller = new AbortController();
-      mappingAbortControllerRef.current = controller;
-      const response = await fetch("/api/extraction/map", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          eventId: event.id,
-          startUrl: event.url,
-        }),
-        signal: controller.signal,
-      });
-
-      const payload = (await response.json()) as MapApiResponse;
-      if (!response.ok) {
-        throw new Error(payload.error ?? "Could not map event URLs.");
+      if (startedAtMs) {
+        setLastRunDurationSeconds(Math.floor((Date.now() - startedAtMs) / 1000));
       }
-
-      const completedAt = new Date().toLocaleTimeString();
-      // Step 1: Only mapping counters are populated; processing stays zero.
-      const completed: EventRecord = {
-        ...inProgress,
-        latestJob: {
-          status: "complete",
-          counters: {
-            totalUrlsMapped: payload.totalMappedUrls,
-            urlsDiscovered: payload.filteredUrls.length,
-            pagesProcessed: 0,
-            sessionsFound: 0,
-            speakerAppearancesFound: 0,
-            uniqueSpeakersFound: 0,
-          },
-          logLines: [
-            ...inProgress.latestJob.logLines.slice(-14),
-            `[${completedAt}] Firecrawl map completed (${payload.totalMappedUrls} total URLs).`,
-            `[${completedAt}] URLs after filter: ${payload.filteredUrls.length}.`,
-            `[${completedAt}] Pages processed remains 0 for Step 1.`,
-          ].slice(-20),
-          mappedUrls: payload.mappedUrls,
-          filteredUrls: payload.filteredUrls,
-          processedUrls: [],
-          updatedAt: new Date().toISOString(),
-        },
-      };
-
-      await appendEventJob(event.id, completed.latestJob);
-      const refreshed = await getEventById(event.id);
-      setEvent(refreshed ?? completed);
-      setPanelMode("afterFilter");
-    } catch (runError) {
-      const failedAt = new Date().toLocaleTimeString();
-      const isCanceled =
-        runError instanceof DOMException && runError.name === "AbortError";
-      const failedMessage = isCanceled
-        ? "Extraction was cancelled."
-        : runError instanceof Error
-          ? runError.message
-          : "Could not finalize extraction.";
-      const failed: EventRecord = {
-        ...inProgress,
-        latestJob: {
-          ...inProgress.latestJob,
-          status: "failed",
-          logLines: [
-            ...inProgress.latestJob.logLines.slice(-18),
-            `[${failedAt}] ${isCanceled ? "Mapping cancelled" : "Mapping failed"}: ${failedMessage}`,
-          ].slice(-20),
-          updatedAt: new Date().toISOString(),
-        },
-      };
-
-      try {
-        await appendEventJob(event.id, failed.latestJob);
-      } catch {
-        // Step 1: Avoid breaking the page when failed-status persistence also fails.
-      }
-
-      setEvent(failed);
-      setError(failedMessage);
-    } finally {
-      mappingAbortControllerRef.current = null;
-      setIsRunning(false);
-    }
+      setRunStartedAtMs(null);
+      activeRunPromiseRef.current = null;
+    });
+    setPanelMode("processed");
   }
 
   if (isLoading) {
@@ -228,30 +222,41 @@ export default function EventDetailPage() {
       </div>
 
       <section className="mb-6 rounded-lg border p-4">
-        <div className="mb-4 flex flex-wrap items-center gap-3">
-          <button
-            onClick={() => void runExtraction()}
-            disabled={isRunning}
-            className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-zinc-400"
-          >
-            {isRunning ? "Running..." : "Run Extraction"}
-          </button>
-          {isRunning ? (
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <button
-              type="button"
-              onClick={cancelExtraction}
-              className="rounded-md border border-red-300 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-100"
+              onClick={() => void runExtraction()}
+              disabled={isRunning}
+              className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-zinc-400"
             >
-              Cancel Run
+              {isRunning ? "Running..." : "Run Extraction"}
             </button>
-          ) : null}
-          <span className="text-sm">
-            Latest status:{" "}
-            <span className="font-medium capitalize">{event.latestJob.status}</span>
-          </span>
-          <span className="text-sm text-zinc-600">
-            Last updated: {formatDate(event.latestJob.updatedAt)}
-          </span>
+            {isRunning ? (
+              <button
+                type="button"
+                onClick={cancelExtraction}
+                className="rounded-md border border-red-300 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-100"
+              >
+                Cancel Run
+              </button>
+            ) : null}
+            <span className="text-sm">
+              Latest status:{" "}
+              <span className="font-medium capitalize">{event.latestJob.status}</span>
+            </span>
+            <span className="text-sm text-zinc-600">
+              Last updated: {formatDate(event.latestJob.updatedAt)}
+            </span>
+          </div>
+          <div className="min-w-[180px] rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-right">
+            <p className="text-[11px] uppercase tracking-wide text-zinc-600">Processing Timer</p>
+            <p className="mt-0.5 text-base font-semibold tabular-nums">
+              {formatDuration(isRunning ? elapsedSeconds : (lastRunDurationSeconds ?? 0))}
+            </p>
+            <p className="mt-1 text-[11px] text-zinc-600">
+              {isRunning ? "Current run" : "Latest run"}
+            </p>
+          </div>
         </div>
         {error ? <p className="mb-3 text-sm text-red-600">{error}</p> : null}
 
@@ -274,18 +279,22 @@ export default function EventDetailPage() {
           <CounterCard
             label="Conference sessions"
             value={event.latestJob.counters.sessionsFound}
+            onClick={() => setPanelMode("conferenceSessions")}
           />
           <CounterCard
             label="Unique speakers"
             value={event.latestJob.counters.uniqueSpeakersFound}
+            onClick={() => setPanelMode("uniqueSpeakers")}
           />
         </div>
         {panelMode ? (
-          <UrlPanel
+          <DebugPanel
             mode={panelMode}
             mappedUrls={event.latestJob.mappedUrls}
             filteredUrls={event.latestJob.filteredUrls}
             processedUrls={event.latestJob.processedUrls}
+            sessions={event.sessions}
+            speakers={event.speakers}
           />
         ) : null}
 
@@ -311,22 +320,24 @@ export default function EventDetailPage() {
           <table className="w-full border-collapse text-sm">
             <thead className="bg-zinc-50">
               <tr>
+                <th className="p-3 text-left font-medium">#</th>
                 <th className="p-3 text-left font-medium">Name</th>
                 <th className="p-3 text-left font-medium">Organization</th>
                 <th className="p-3 text-left font-medium">Title</th>
-                <th className="p-3 text-left font-medium">Profile URL</th>
+                <th className="p-3 text-left font-medium">Profile Website URL</th>
               </tr>
             </thead>
             <tbody>
               {event.speakers.length === 0 ? (
                 <tr>
-                  <td className="p-3 text-zinc-600" colSpan={4}>
+                  <td className="p-3 text-zinc-600" colSpan={5}>
                     No speakers yet. Results will appear here after extraction.
                   </td>
                 </tr>
               ) : (
-                event.speakers.map((speaker) => (
+                event.speakers.map((speaker, index) => (
                   <tr key={speaker.id} className="border-t border-zinc-200">
+                    <td className="p-3">{index + 1}</td>
                     <td className="p-3">{speaker.name}</td>
                     <td className="p-3">{speaker.organization}</td>
                     <td className="p-3">{speaker.title ?? "-"}</td>
@@ -353,9 +364,8 @@ function CounterCard({
 }) {
   return (
     <div
-      className={`rounded-md border border-zinc-200 bg-zinc-50 p-3 ${
-        onClick ? "cursor-pointer hover:bg-zinc-100" : ""
-      }`}
+      className={`rounded-md border border-zinc-200 bg-zinc-50 p-3 ${onClick ? "cursor-pointer hover:bg-zinc-100" : ""
+        }`}
       onClick={onClick}
       onKeyDown={(event) => {
         if (!onClick) {
@@ -375,46 +385,89 @@ function CounterCard({
   );
 }
 
-function UrlPanel({
+function DebugPanel({
   mode,
   mappedUrls,
   filteredUrls,
   processedUrls,
+  sessions,
+  speakers,
 }: {
   mode: NonNullable<MappingPanelMode>;
   mappedUrls: string[];
   filteredUrls: string[];
   processedUrls: string[];
+  sessions: EventRecord["sessions"];
+  speakers: EventRecord["speakers"];
 }) {
-  const config =
+  const config: {
+    title: string;
+    emptyText: string;
+    type: "urlList" | "json";
+    urls?: string[];
+    data?: unknown;
+  } =
     mode === "totalMapped"
       ? {
           title: "Total URLs mapped",
+          type: "urlList",
           urls: mappedUrls,
           emptyText: "No mapped URLs yet.",
         }
       : mode === "afterFilter"
         ? {
             title: "URLs after filter",
+            type: "urlList",
             urls: filteredUrls,
             emptyText: "No filtered URLs yet.",
           }
-        : {
-            title: "Pages processed",
-            urls: processedUrls,
-            emptyText: "No processed pages yet.",
-          };
+        : mode === "processed"
+          ? {
+              title: "Pages processed",
+              type: "urlList",
+              urls: processedUrls,
+              emptyText: "No processed pages yet.",
+            }
+          : mode === "conferenceSessions"
+            ? {
+                title: "Conference sessions raw data",
+                type: "json",
+                data: sessions,
+                emptyText: "No conference sessions yet.",
+              }
+            : {
+                title: "Unique speakers raw data",
+                type: "json",
+                data: speakers,
+                emptyText: "No unique speakers yet.",
+              };
+
+  const urls = config.urls ?? [];
+  const data = config.data;
+  const jsonText = data ? JSON.stringify(data, null, 2) : "";
+
+  const textToCopy =
+    config.type === "urlList"
+      ? `${config.title}\nTotal: ${urls.length}\n\n${urls.join("\n")}`
+      : `${config.title}\nTotal: ${Array.isArray(data) ? data.length : 0}\n\n${jsonText}`;
+
+  const total =
+    config.type === "urlList" ? urls.length : Array.isArray(data) ? data.length : 0;
+
+  const hasRows = total > 0;
+
   const panelTextRef = useRef<HTMLDivElement | null>(null);
   const [copyLabel, setCopyLabel] = useState("Copy");
 
   async function handleCopy(): Promise<void> {
-    const textToCopy = panelTextRef.current?.innerText?.trim();
-    if (!textToCopy) {
+    const fallbackText = panelTextRef.current?.innerText?.trim();
+    const value = textToCopy.trim() || fallbackText;
+    if (!value) {
       return;
     }
 
     try {
-      await navigator.clipboard.writeText(textToCopy);
+      await navigator.clipboard.writeText(value);
       setCopyLabel("Copied");
       setTimeout(() => setCopyLabel("Copy"), 1500);
     } catch {
@@ -435,18 +488,20 @@ function UrlPanel({
           {copyLabel}
         </button>
       </div>
-      <p className="mb-2 text-xs text-zinc-600">Total: {config.urls.length}</p>
+      <p className="mb-2 text-xs text-zinc-600">Total: {total}</p>
       <div className="max-h-52 overflow-auto rounded-md border bg-zinc-50 p-2">
-        {config.urls.length === 0 ? (
+        {!hasRows ? (
           <p className="text-sm text-zinc-600">{config.emptyText}</p>
-        ) : (
+        ) : config.type === "urlList" ? (
           <ul className="space-y-1 text-sm text-zinc-700">
-            {config.urls.map((url) => (
+            {urls.map((url) => (
               <li key={url} className="break-all">
                 {url}
               </li>
             ))}
           </ul>
+        ) : (
+          <pre className="text-xs text-zinc-700 whitespace-pre-wrap wrap-break-word">{jsonText}</pre>
         )}
       </div>
     </div>

@@ -4,6 +4,7 @@ import {
   appendJobToEventInDb,
   createEventInDb,
   deleteEventByIdFromDb,
+  deleteEventsByIdsFromDb,
   getEventByIdFromDb,
   listEventsFromDb,
   updateEventBasicsInDb,
@@ -37,8 +38,30 @@ export async function deleteEventById(id: string): Promise<void> {
   await deleteEventByIdFromDb(id);
 }
 
+export async function deleteEventsByIds(ids: string[]): Promise<void> {
+  await deleteEventsByIdsFromDb(ids);
+}
+
 export async function appendEventJob(id: string, job: EventJob): Promise<void> {
   await appendJobToEventInDb(id, job);
+}
+
+export async function startExtraction(
+  eventId: string,
+  startUrl: string,
+): Promise<void> {
+  const response = await fetch("/api/extraction/map", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ eventId, startUrl }),
+  });
+
+  const payload = (await response.json()) as {
+    error?: string;
+  };
+  if (!response.ok) {
+    throw new Error(payload.error ?? "Could not start extraction.");
+  }
 }
 
 export function buildMockExtractionResult(previousLogLines: string[]): EventJob {

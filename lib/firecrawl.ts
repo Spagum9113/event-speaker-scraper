@@ -6,6 +6,46 @@ type FirecrawlMapResponse = {
   } | unknown;
 };
 
+type FirecrawlScrapeResponse = {
+  success?: boolean;
+  data?: {
+    json?: unknown;
+    metadata?: {
+      title?: unknown;
+    } | null;
+  } | null;
+};
+
+export type SessionExtractedRow = {
+  title: string;
+  url: string;
+};
+
+export type SpeakerAppearanceExtractedRow = {
+  name: string;
+  organization?: string;
+  title?: string;
+  profileUrl?: string;
+  role?: string;
+  sessionUrl: string;
+};
+
+type ScrapedSessionModel = {
+  title?: unknown;
+  url?: unknown;
+  speakers?: unknown;
+};
+
+const SESSION_URL_KEYWORDS = [
+  "agenda",
+  "schedule",
+  "session",
+  "sessions",
+  "program",
+  "speaker",
+  "speakers",
+];
+
 // Step 1: Treat these extensions as non-page assets and filter them out.
 const ASSET_EXTENSIONS = new Set([
   ".css",
@@ -38,6 +78,14 @@ function getFirecrawlApiKey(): string {
     throw new Error("Missing FIRECRAWL_API_KEY.");
   }
   return apiKey;
+}
+
+function normalizeTextValue(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function parseMappedUrls(payload: FirecrawlMapResponse): string[] {
@@ -119,7 +167,8 @@ export async function mapEventUrlsWithFirecrawl(startUrl: string): Promise<{
   totalMappedUrls: number;
   mappedUrls: string[];
   filteredUrls: string[];
-}> {
+}> 
+{
   const apiKey = getFirecrawlApiKey();
 
   // Step 1: Server-side map call so API key never reaches the browser.
@@ -147,4 +196,196 @@ export async function mapEventUrlsWithFirecrawl(startUrl: string): Promise<{
     mappedUrls,
     filteredUrls,
   };
+}
+
+export function filterLikelySessionUrls(urls: string[], maxPages: number): string[] {
+  const selected: string[] = [];
+
+  for (const value of urls) {
+    try {
+      const parsed = new URL(value);
+      const candidate = `${parsed.pathname}${parsed.search}`.toLowerCase();
+      const isLikelySessionUrl = SESSION_URL_KEYWORDS.some((keyword) =>
+        candidate.includes(keyword),
+      );
+
+      if (isLikelySessionUrl) {
+        selected.push(parsed.toString());
+      }
+    } catch {
+      continue;
+    }
+
+    if (selected.length >= maxPages) {
+      break;
+    }
+  }
+
+  return selected;
+}
+
+function parseStructuredSessions(payload: unknown, pageUrl: string): ScrapedSessionModel[] {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+
+  const record = payload as {
+    sessions?: unknown;
+    items?: unknown;
+    data?: unknown;
+    title?: unknown;
+    speakers?: unknown;
+  };
+
+  if (Array.isArray(record.sessions)) {
+    return record.sessions as ScrapedSessionModel[];
+  }
+  if (Array.isArray(record.items)) {
+    return record.items as ScrapedSessionModel[];
+  }
+  if (Array.isArray(record.data)) {
+    return record.data as ScrapedSessionModel[];
+  }
+
+  const singleTitle = normalizeTextValue(record.title);
+  if (!singleTitle) {
+    return [];
+  }
+
+  return [{ title: singleTitle, url: pageUrl, speakers: record.speakers }];
+}
+
+function toSessionAndAppearances(
+  sessions: ScrapedSessionModel[],
+  pageUrl: string,
+): {
+  sessions: SessionExtractedRow[];
+  appearances: SpeakerAppearanceExtractedRow[];
+} {
+  const normalizedSessions: SessionExtractedRow[] = [];
+  const normalizedAppearances: SpeakerAppearanceExtractedRow[] = [];
+
+  for (const session of sessions) {
+    const sessionTitle = normalizeTextValue(session.title);
+    if (!sessionTitle) {
+      continue;
+    }
+
+    const sessionUrl = normalizeTextValue(session.url) ?? pageUrl;
+    normalizedSessions.push({
+      title: sessionTitle,
+      url: sessionUrl,
+    });
+
+    const speakers = Array.isArray(session.speakers) ? session.speakers : [];
+    for (const speaker of speakers) {
+      if (!speaker || typeof speaker !== "object") {
+        continue;
+      }
+      const speakerRecord = speaker as {
+        name?: unknown;
+        organization?: unknown;
+        title?: unknown;
+        profileUrl?: unknown;
+        profileWebsiteUrl?: unknown;
+        websiteUrl?: unknown;
+        role?: unknown;
+      };
+      const speakerName = normalizeTextValue(speakerRecord.name);
+      if (!speakerName) {
+        continue;
+      }
+
+      normalizedAppearances.push({
+        name: speakerName,
+        organization: normalizeTextValue(speakerRecord.organization),
+        title: normalizeTextValue(speakerRecord.title),
+        // Accept common variants so future runs keep speaker website URLs.
+        profileUrl:
+          normalizeTextValue(speakerRecord.profileWebsiteUrl) ??
+          normalizeTextValue(speakerRecord.websiteUrl) ??
+          normalizeTextValue(speakerRecord.profileUrl),
+        role: normalizeTextValue(speakerRecord.role),
+        sessionUrl,
+      });
+    }
+  }
+
+  return {
+    sessions: normalizedSessions,
+    appearances: normalizedAppearances,
+  };
+}
+
+export async function scrapeStructuredSessionPage(
+  pageUrl: string,
+  signal?: AbortSignal,
+): Promise<{
+  sessions: SessionExtractedRow[];
+  appearances: SpeakerAppearanceExtractedRow[];
+}> {
+  const apiKey = getFirecrawlApiKey();
+
+  const response = await fetch("https://api.firecrawl.dev/v1/scrape", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      url: pageUrl,
+      onlyMainContent: true,
+      formats: ["json"],
+      jsonOptions: {
+        prompt:
+          "Extract conference sessions and the speakers listed for each session on this page. Return an object with `sessions` array. Each session must contain `title`, optional `url`, and `speakers` array. Each speaker item should include `name`, optional `organization`, optional `title`, optional `profileWebsiteUrl` (speaker website/profile page URL), optional `profileUrl`, optional `websiteUrl`, optional `role`.",
+        schema: {
+          type: "object",
+          properties: {
+            sessions: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  title: { type: "string" },
+                  url: { type: "string" },
+                  speakers: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      properties: {
+                        name: { type: "string" },
+                        organization: { type: "string" },
+                        title: { type: "string" },
+                        profileWebsiteUrl: { type: "string" },
+                        profileUrl: { type: "string" },
+                        websiteUrl: { type: "string" },
+                        role: { type: "string" },
+                      },
+                      required: ["name"],
+                    },
+                  },
+                },
+                required: ["title"],
+              },
+            },
+          },
+          required: ["sessions"],
+        },
+      },
+      timeout: 30000,
+    }),
+    cache: "no-store",
+    signal,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Firecrawl scrape failed (${response.status}) for ${pageUrl}: ${errorText}`);
+  }
+
+  const payload = (await response.json()) as FirecrawlScrapeResponse;
+  const extractedJson = payload.data?.json;
+  const sessions = parseStructuredSessions(extractedJson, pageUrl);
+  return toSessionAndAppearances(sessions, pageUrl);
 }

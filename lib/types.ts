@@ -23,6 +23,12 @@ export type SpeakerRow = {
   profileUrl?: string;
 };
 
+export type SessionRow = {
+  id: string;
+  title: string;
+  url: string;
+};
+
 export type EventJob = {
   status: JobStatus;
   counters: JobCounters;
@@ -39,6 +45,7 @@ export type EventRecord = {
   url: string;
   createdAt: string;
   latestJob: EventJob;
+  sessions: SessionRow[];
   speakers: SpeakerRow[];
 };
 

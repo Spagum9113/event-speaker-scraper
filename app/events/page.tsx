@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useState } from "react";
 import {
   deleteEventById,
+  deleteEventsByIds,
   listEvents,
   updateEventBasics,
 } from "@/lib/events-store";
@@ -28,6 +29,8 @@ export default function EventsPage() {
   const [editName, setEditName] = useState("");
   const [editUrl, setEditUrl] = useState("");
   const [editError, setEditError] = useState("");
+  const [selectedEventIds, setSelectedEventIds] = useState<string[]>([]);
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -59,6 +62,12 @@ export default function EventsPage() {
     };
   }, []);
 
+  useEffect(() => {
+    setSelectedEventIds((current) =>
+      current.filter((selectedId) => events.some((eventRecord) => eventRecord.id === selectedId)),
+    );
+  }, [events]);
+
   function handleEdit(eventRecord: EventRecord): void {
     // Use an inline modal instead of prompt() so editing is reliable and visible.
     setEditTargetId(eventRecord.id);
@@ -85,9 +94,58 @@ export default function EventsPage() {
     }
 
     setEvents((current) => current.filter((item) => item.id !== eventRecord.id));
+    setSelectedEventIds((current) => current.filter((id) => id !== eventRecord.id));
     setOpenMenuEventId(null);
     setMenuPosition(null);
   }
+
+  function toggleEventSelection(eventId: string): void {
+    setSelectedEventIds((current) =>
+      current.includes(eventId)
+        ? current.filter((id) => id !== eventId)
+        : [...current, eventId],
+    );
+  }
+
+  function toggleAllEventsSelection(shouldSelectAll: boolean): void {
+    if (!shouldSelectAll) {
+      setSelectedEventIds([]);
+      return;
+    }
+
+    setSelectedEventIds(events.map((eventRecord) => eventRecord.id));
+  }
+
+  async function handleDeleteSelected(): Promise<void> {
+    if (selectedEventIds.length === 0) {
+      return;
+    }
+
+    const shouldDelete = window.confirm(
+      `Delete ${selectedEventIds.length} selected event(s)? This cannot be undone.`,
+    );
+    if (!shouldDelete) {
+      return;
+    }
+
+    setIsBulkDeleting(true);
+    try {
+      await deleteEventsByIds(selectedEventIds);
+      setEvents((current) =>
+        current.filter((eventRecord) => !selectedEventIds.includes(eventRecord.id)),
+      );
+      setSelectedEventIds([]);
+      setLoadError("");
+    } catch (error) {
+      setLoadError(
+        error instanceof Error ? error.message : "Failed to delete selected events.",
+      );
+    } finally {
+      setIsBulkDeleting(false);
+    }
+  }
+
+  const allVisibleSelected = events.length > 0 && selectedEventIds.length === events.length;
 
   async function handleSaveEdit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -139,12 +197,24 @@ export default function EventsPage() {
             History of created events and their latest extraction status.
           </p>
         </div>
-        <Link
-          href="/events/new"
-          className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700"
-        >
-          New Event
-        </Link>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void handleDeleteSelected()}
+            disabled={selectedEventIds.length === 0 || isBulkDeleting}
+            className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isBulkDeleting
+              ? "Deleting..."
+              : `Delete Selected (${selectedEventIds.length})`}
+          </button>
+          <Link
+            href="/events/new"
+            className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700"
+          >
+            New Event
+          </Link>
+        </div>
       </div>
 
       <div className="rounded-lg border border-zinc-200">
@@ -152,6 +222,15 @@ export default function EventsPage() {
           <table className="w-full border-collapse text-sm">
           <thead className="bg-zinc-50">
             <tr>
+              <th className="p-3 text-left font-medium">
+                <input
+                  type="checkbox"
+                  aria-label="Select all events"
+                  checked={allVisibleSelected}
+                  onChange={(event) => toggleAllEventsSelection(event.target.checked)}
+                  disabled={events.length === 0}
+                />
+              </th>
               <th className="p-3 text-left font-medium">Name</th>
               <th className="p-3 text-left font-medium">URL</th>
               <th className="p-3 text-left font-medium">Latest Status</th>
@@ -162,19 +241,19 @@ export default function EventsPage() {
             <tbody>
             {isLoading ? (
               <tr>
-                <td className="p-3 text-zinc-600" colSpan={5}>
+                <td className="p-3 text-zinc-600" colSpan={6}>
                   Loading events...
                 </td>
               </tr>
             ) : loadError ? (
               <tr>
-                <td className="p-3 text-red-600" colSpan={5}>
+                <td className="p-3 text-red-600" colSpan={6}>
                   {loadError}
                 </td>
               </tr>
             ) : events.length === 0 ? (
               <tr>
-                <td className="p-3 text-zinc-600" colSpan={5}>
+                <td className="p-3 text-zinc-600" colSpan={6}>
                   No events yet. Create your first one.
                 </td>
               </tr>
@@ -185,6 +264,15 @@ export default function EventsPage() {
                   onDoubleClick={() => router.push(`/events/${eventRecord.id}`)}
                   className="cursor-pointer border-t border-zinc-200"
                 >
+                  <td className="p-3" onDoubleClick={(event) => event.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${eventRecord.name}`}
+                      checked={selectedEventIds.includes(eventRecord.id)}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={() => toggleEventSelection(eventRecord.id)}
+                    />
+                  </td>
                   <td className="p-3">
                     <Link
                       href={`/events/${eventRecord.id}`}
