@@ -21,6 +21,7 @@ function formatDate(isoDate: string): string {
 
 export default function EventDetailPage() {
   const params = useParams<{ id: string }>();
+  // Step 1: Keep a handle to cancel the in-flight map request from UI.
   const mappingAbortControllerRef = useRef<AbortController | null>(null);
   const [event, setEvent] = useState<EventRecord | null>(null);
   const [isRunning, setIsRunning] = useState(false);
@@ -82,7 +83,7 @@ export default function EventDetailPage() {
     setError("");
     const startedAt = new Date().toLocaleTimeString();
 
-    // First update simulates the in-progress status the backend job will later drive.
+    // Step 1: Write an immediate "crawling" job snapshot so UI updates instantly.
     const inProgress: EventRecord = {
       ...event,
       latestJob: {
@@ -108,6 +109,7 @@ export default function EventDetailPage() {
     }
 
     try {
+      // Step 1: Each run gets its own cancel token.
       const controller = new AbortController();
       mappingAbortControllerRef.current = controller;
       const response = await fetch("/api/extraction/map", {
@@ -126,6 +128,7 @@ export default function EventDetailPage() {
       }
 
       const completedAt = new Date().toLocaleTimeString();
+      // Step 1: Only mapping counters are populated; processing stays zero.
       const completed: EventRecord = {
         ...inProgress,
         latestJob: {
@@ -180,7 +183,7 @@ export default function EventDetailPage() {
       try {
         await appendEventJob(event.id, failed.latestJob);
       } catch {
-        // Keep UI stable even if persisting failed status fails.
+        // Step 1: Avoid breaking the page when failed-status persistence also fails.
       }
 
       setEvent(failed);
@@ -256,17 +259,17 @@ export default function EventDetailPage() {
           <CounterCard
             label="Total URLs mapped"
             value={event.latestJob.counters.totalUrlsMapped}
-            onDoubleClick={() => setPanelMode("totalMapped")}
+            onClick={() => setPanelMode("totalMapped")}
           />
           <CounterCard
             label="URLs after filter"
             value={event.latestJob.counters.urlsDiscovered}
-            onDoubleClick={() => setPanelMode("afterFilter")}
+            onClick={() => setPanelMode("afterFilter")}
           />
           <CounterCard
             label="Pages processed"
             value={event.latestJob.counters.pagesProcessed}
-            onDoubleClick={() => setPanelMode("processed")}
+            onClick={() => setPanelMode("processed")}
           />
           <CounterCard
             label="Conference sessions"
@@ -343,18 +346,29 @@ export default function EventDetailPage() {
 function CounterCard({
   label,
   value,
-  onDoubleClick,
+  onClick,
 }: {
   label: string;
   value: number;
-  onDoubleClick?: () => void;
+  onClick?: () => void;
 }) {
   return (
     <div
-      className="rounded-md border border-zinc-200 bg-zinc-50 p-3"
-      onDoubleClick={onDoubleClick}
-      role={onDoubleClick ? "button" : undefined}
-      tabIndex={onDoubleClick ? 0 : undefined}
+      className={`rounded-md border border-zinc-200 bg-zinc-50 p-3 ${
+        onClick ? "cursor-pointer hover:bg-zinc-100" : ""
+      }`}
+      onClick={onClick}
+      onKeyDown={(event) => {
+        if (!onClick) {
+          return;
+        }
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onClick();
+        }
+      }}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
     >
       <p className="text-xs uppercase tracking-wide text-zinc-600">{label}</p>
       <p className="mt-1 text-lg font-semibold">{value}</p>

@@ -6,6 +6,7 @@ type FirecrawlMapResponse = {
   } | unknown;
 };
 
+// Step 1: Treat these extensions as non-page assets and filter them out.
 const ASSET_EXTENSIONS = new Set([
   ".css",
   ".js",
@@ -40,6 +41,7 @@ function getFirecrawlApiKey(): string {
 }
 
 function parseMappedUrls(payload: FirecrawlMapResponse): string[] {
+  // Step 1: Firecrawl responses can vary, so check common locations in order.
   const candidates = [
     payload.links,
     payload.data && typeof payload.data === "object"
@@ -62,6 +64,7 @@ function isHttpProtocol(url: URL): boolean {
 }
 
 function isHtmlLikePath(pathname: string): boolean {
+  // Step 1: Paths without file extension are assumed to be HTML pages.
   const lastDot = pathname.lastIndexOf(".");
   if (lastDot <= pathname.lastIndexOf("/")) {
     return true;
@@ -74,6 +77,7 @@ function isHtmlLikePath(pathname: string): boolean {
 function normalizeUrl(input: string): string | null {
   try {
     const parsed = new URL(input);
+    // Step 1: Ignore fragment-only differences during de-duplication.
     parsed.hash = "";
     return parsed.toString();
   } catch {
@@ -82,6 +86,7 @@ function normalizeUrl(input: string): string | null {
 }
 
 export function filterMappedUrls(startUrl: string, mappedUrls: string[]): string[] {
+  // Step 1: Keep results on the exact same hostname as the event URL.
   const originHost = new URL(startUrl).hostname.toLowerCase();
   const deduped = new Set<string>();
 
@@ -95,9 +100,11 @@ export function filterMappedUrls(startUrl: string, mappedUrls: string[]): string
     if (!isHttpProtocol(parsed)) {
       continue;
     }
+    // Step 1: Skip cross-domain links discovered by the mapper.
     if (parsed.hostname.toLowerCase() !== originHost) {
       continue;
     }
+    // Step 1: Skip static files/docs and keep page-like URLs.
     if (!isHtmlLikePath(parsed.pathname)) {
       continue;
     }
@@ -115,6 +122,7 @@ export async function mapEventUrlsWithFirecrawl(startUrl: string): Promise<{
 }> {
   const apiKey = getFirecrawlApiKey();
 
+  // Step 1: Server-side map call so API key never reaches the browser.
   const response = await fetch("https://api.firecrawl.dev/v1/map", {
     method: "POST",
     headers: {
