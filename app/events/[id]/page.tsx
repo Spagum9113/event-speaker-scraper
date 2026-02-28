@@ -286,7 +286,6 @@ export default function EventDetailPage() {
             mappedUrls={event.latestJob.mappedUrls}
             filteredUrls={event.latestJob.filteredUrls}
             processedUrls={event.latestJob.processedUrls}
-            onClose={() => setPanelMode(null)}
           />
         ) : null}
 
@@ -381,13 +380,11 @@ function UrlPanel({
   mappedUrls,
   filteredUrls,
   processedUrls,
-  onClose,
 }: {
   mode: NonNullable<MappingPanelMode>;
   mappedUrls: string[];
   filteredUrls: string[];
   processedUrls: string[];
-  onClose: () => void;
 }) {
   const config =
     mode === "totalMapped"
@@ -407,17 +404,35 @@ function UrlPanel({
             urls: processedUrls,
             emptyText: "No processed pages yet.",
           };
+  const panelTextRef = useRef<HTMLDivElement | null>(null);
+  const [copyLabel, setCopyLabel] = useState("Copy");
+
+  async function handleCopy(): Promise<void> {
+    const textToCopy = panelTextRef.current?.innerText?.trim();
+    if (!textToCopy) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(textToCopy);
+      setCopyLabel("Copied");
+      setTimeout(() => setCopyLabel("Copy"), 1500);
+    } catch {
+      setCopyLabel("Copy failed");
+      setTimeout(() => setCopyLabel("Copy"), 1500);
+    }
+  }
 
   return (
-    <div className="mt-4 rounded-md border border-zinc-200 bg-white p-3">
+    <div ref={panelTextRef} className="mt-4 rounded-md border border-zinc-200 bg-white p-3">
       <div className="mb-2 flex items-center justify-between">
         <h3 className="text-sm font-semibold">{config.title}</h3>
         <button
           type="button"
-          onClick={onClose}
+          onClick={() => void handleCopy()}
           className="text-xs text-zinc-600 hover:underline"
         >
-          Close
+          {copyLabel}
         </button>
       </div>
       <p className="mb-2 text-xs text-zinc-600">Total: {config.urls.length}</p>
