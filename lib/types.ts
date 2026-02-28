@@ -29,6 +29,21 @@ export type SessionRow = {
   url: string;
 };
 
+export type ScrapeArtifact = {
+  id: string;
+  jobId: string;
+  eventId: string;
+  url: string;
+  success: boolean;
+  rawPayload: unknown;
+  extractedJson: unknown;
+  metadata: Record<string, unknown> | null;
+  markdown?: string;
+  html?: string;
+  error?: string;
+  createdAt: string;
+};
+
 export type EventJob = {
   status: JobStatus;
   counters: JobCounters;
@@ -36,6 +51,7 @@ export type EventJob = {
   mappedUrls: string[];
   filteredUrls: string[];
   processedUrls: string[];
+  pageScrapes: ScrapeArtifact[];
   updatedAt: string;
 };
 

@@ -2,12 +2,14 @@ import { NextResponse } from "next/server";
 import {
   defaultJob,
   createJobForEventInDb,
+  createJobPageScrapesInDb,
   persistExtractedConferenceDataInDb,
   updateJobByIdInDb,
 } from "@/lib/events-repository";
 import {
   filterLikelySessionUrls,
   mapEventUrlsWithFirecrawl,
+  ScrapeDebugArtifact,
   scrapeStructuredSessionPage,
   SessionExtractedRow,
   SpeakerAppearanceExtractedRow,
@@ -103,6 +105,7 @@ export async function POST(request: Request) {
 
     const extractedSessions: SessionExtractedRow[] = [];
     const extractedAppearances: SpeakerAppearanceExtractedRow[] = [];
+    const scrapeArtifacts: ScrapeDebugArtifact[] = [];
     const processedUrls: string[] = [];
     const scrapeErrors: string[] = [];
 
@@ -116,10 +119,18 @@ export async function POST(request: Request) {
         processedUrls.push(sessionUrl);
         extractedSessions.push(...structured.sessions);
         extractedAppearances.push(...structured.appearances);
+        scrapeArtifacts.push(structured.debugArtifact);
         appendLogLine(`Processed page ${processedUrls.length}/${targetedSessionUrls.length}: ${sessionUrl}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown scrape error.";
         scrapeErrors.push(`${sessionUrl}: ${message}`);
+        scrapeArtifacts.push({
+          url: sessionUrl,
+          success: false,
+          rawPayload: null,
+          extractedJson: null,
+          error: message,
+        });
         appendLogLine(`Scrape failed for ${sessionUrl}.`);
       }
 
@@ -158,6 +169,15 @@ export async function POST(request: Request) {
       },
       supabase,
     );
+
+    try {
+      await createJobPageScrapesInDb(jobId, eventId, scrapeArtifacts, supabase);
+      appendLogLine(`Saved ${scrapeArtifacts.length} page scrape artifacts.`);
+    } catch (artifactError) {
+      const artifactMessage =
+        artifactError instanceof Error ? artifactError.message : "Unknown page artifact save error.";
+      appendLogLine(`Page artifact persistence failed: ${artifactMessage}`);
+    }
 
     const persisted = await persistExtractedConferenceDataInDb(
       eventId,

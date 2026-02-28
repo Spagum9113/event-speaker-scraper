@@ -1,7 +1,16 @@
 import { SupabaseClient } from "@supabase/supabase-js";
-import { EventJob, EventRecord, JobCounters, JobStatus, SessionRow, SpeakerRow } from "@/lib/types";
+import {
+  EventJob,
+  EventRecord,
+  JobCounters,
+  JobStatus,
+  ScrapeArtifact,
+  SessionRow,
+  SpeakerRow,
+} from "@/lib/types";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import type {
+  ScrapeDebugArtifact,
   SessionExtractedRow,
   SpeakerAppearanceExtractedRow,
 } from "@/lib/firecrawl";
@@ -27,6 +36,21 @@ type DbJob = {
   mapped_urls: unknown;
   filtered_urls: unknown;
   processed_urls: unknown;
+  error: string | null;
+  created_at: string;
+};
+
+type DbJobPageScrape = {
+  id: string;
+  job_id: string;
+  event_id: string;
+  url: string;
+  success: boolean;
+  raw_payload: unknown;
+  extracted_json: unknown;
+  metadata: unknown;
+  markdown: string | null;
+  html: string | null;
   error: string | null;
   created_at: string;
 };
@@ -100,6 +124,7 @@ export function defaultJob(status: JobStatus = "queued"): EventJob {
     mappedUrls: [],
     filteredUrls: [],
     processedUrls: [],
+    pageScrapes: [],
     updatedAt: nowIso(),
   };
 }
@@ -122,7 +147,30 @@ function parseUrlList(rawList: unknown): string[] {
   return rawList.filter((entry): entry is string => typeof entry === "string");
 }
 
-function toEventJob(row: DbJob | null): EventJob {
+function parseMetadataValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function toScrapeArtifact(row: DbJobPageScrape): ScrapeArtifact {
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    eventId: row.event_id,
+    url: row.url,
+    success: row.success,
+    rawPayload: row.raw_payload,
+    extractedJson: row.extracted_json,
+    metadata: parseMetadataValue(row.metadata),
+    markdown: row.markdown ?? undefined,
+    html: row.html ?? undefined,
+    error: row.error ?? undefined,
+    createdAt: row.created_at,
+  };
+}
+
+function toEventJob(row: DbJob | null, pageScrapes: ScrapeArtifact[] = []): EventJob {
   if (!row) {
     return defaultJob("queued");
   }
@@ -141,6 +189,7 @@ function toEventJob(row: DbJob | null): EventJob {
     mappedUrls: parseUrlList(row.mapped_urls),
     filteredUrls: parseUrlList(row.filtered_urls),
     processedUrls: parseUrlList(row.processed_urls),
+    pageScrapes,
     updatedAt: row.created_at,
   };
 }
@@ -186,6 +235,7 @@ function toSpeakerRows(rows: DbSpeakerWithOrg[]): SpeakerRow[] {
 function toEventRecord(
   event: DbEvent,
   latestJob: DbJob | null,
+  pageScrapes: ScrapeArtifact[] = [],
   sessions: SessionRow[] = [],
   speakers: SpeakerRow[] = [],
 ): EventRecord {
@@ -194,7 +244,7 @@ function toEventRecord(
     name: event.name,
     url: event.start_url,
     createdAt: event.created_at,
-    latestJob: toEventJob(latestJob),
+    latestJob: toEventJob(latestJob, pageScrapes),
     sessions,
     speakers,
   };
@@ -311,6 +361,11 @@ export async function getEventByIdFromDb(id: string): Promise<EventRecord | null
     throw new Error(latestJobError.message);
   }
 
+  const latestJobId = (latestJobData as DbJob | null)?.id;
+  const pageScrapes = latestJobId
+    ? await listPageScrapesByJobIdFromDb(latestJobId, supabase)
+    : [];
+
   const { data: speakerRows, error: speakersError } = await supabase
     .from("speakers")
     .select("id, canonical_name, title, profile_url, organizations(name)")
@@ -340,9 +395,61 @@ export async function getEventByIdFromDb(id: string): Promise<EventRecord | null
   return toEventRecord(
     eventData as DbEvent,
     (latestJobData as DbJob | null) ?? null,
+    pageScrapes,
     sessions,
     toSpeakerRows((speakerRows ?? []) as DbSpeakerWithOrg[]),
   );
+}
+
+export async function createJobPageScrapesInDb(
+  jobId: string,
+  eventId: string,
+  artifacts: ScrapeDebugArtifact[],
+  client?: SupabaseClient,
+): Promise<void> {
+  if (artifacts.length === 0) {
+    return;
+  }
+
+  const supabase = getSupabaseClient(client);
+  const { error } = await supabase.from("job_page_scrapes").insert(
+    artifacts.map((artifact) => ({
+      job_id: jobId,
+      event_id: eventId,
+      url: artifact.url,
+      success: artifact.success,
+      raw_payload: artifact.rawPayload,
+      extracted_json: artifact.extractedJson ?? null,
+      metadata: artifact.metadata ?? null,
+      markdown: artifact.markdown ?? null,
+      html: artifact.html ?? null,
+      error: artifact.error ?? null,
+    })),
+  );
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
+export async function listPageScrapesByJobIdFromDb(
+  jobId: string,
+  client?: SupabaseClient,
+): Promise<ScrapeArtifact[]> {
+  const supabase = getSupabaseClient(client);
+  const { data, error } = await supabase
+    .from("job_page_scrapes")
+    .select(
+      "id, job_id, event_id, url, success, raw_payload, extracted_json, metadata, markdown, html, error, created_at",
+    )
+    .eq("job_id", jobId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return ((data ?? []) as DbJobPageScrape[]).map(toScrapeArtifact);
 }
 
 export async function createEventInDb(name: string, startUrl: string): Promise<EventRecord> {

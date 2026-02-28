@@ -88,6 +88,7 @@ export function buildMockExtractionResult(previousLogLines: string[]): EventJob 
     mappedUrls: [],
     filteredUrls: [],
     processedUrls: [],
+    pageScrapes: [],
     updatedAt: nowIso(),
   };
 }

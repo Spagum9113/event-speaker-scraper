@@ -10,9 +10,9 @@ type FirecrawlScrapeResponse = {
   success?: boolean;
   data?: {
     json?: unknown;
-    metadata?: {
-      title?: unknown;
-    } | null;
+    markdown?: unknown;
+    html?: unknown;
+    metadata?: unknown;
   } | null;
 };
 
@@ -28,6 +28,17 @@ export type SpeakerAppearanceExtractedRow = {
   profileUrl?: string;
   role?: string;
   sessionUrl: string;
+};
+
+export type ScrapeDebugArtifact = {
+  url: string;
+  success: boolean;
+  rawPayload: unknown;
+  extractedJson: unknown;
+  markdown?: string;
+  html?: string;
+  metadata?: Record<string, unknown>;
+  error?: string;
 };
 
 type ScrapedSessionModel = {
@@ -323,6 +334,7 @@ export async function scrapeStructuredSessionPage(
 ): Promise<{
   sessions: SessionExtractedRow[];
   appearances: SpeakerAppearanceExtractedRow[];
+  debugArtifact: ScrapeDebugArtifact;
 }> {
   const apiKey = getFirecrawlApiKey();
 
@@ -335,7 +347,7 @@ export async function scrapeStructuredSessionPage(
     body: JSON.stringify({
       url: pageUrl,
       onlyMainContent: true,
-      formats: ["json"],
+      formats: ["json", "markdown", "html"],
       jsonOptions: {
         prompt:
           "Extract conference sessions and the speakers listed for each session on this page. Return an object with `sessions` array. Each session must contain `title`, optional `url`, and `speakers` array. Each speaker item should include `name`, optional `organization`, optional `title`, optional `profileWebsiteUrl` (speaker website/profile page URL), optional `profileUrl`, optional `websiteUrl`, optional `role`.",
@@ -386,6 +398,25 @@ export async function scrapeStructuredSessionPage(
 
   const payload = (await response.json()) as FirecrawlScrapeResponse;
   const extractedJson = payload.data?.json;
+  const markdown = normalizeTextValue(payload.data?.markdown);
+  const html = normalizeTextValue(payload.data?.html);
+  const metadata =
+    payload.data?.metadata && typeof payload.data.metadata === "object"
+      ? (payload.data.metadata as Record<string, unknown>)
+      : undefined;
   const sessions = parseStructuredSessions(extractedJson, pageUrl);
-  return toSessionAndAppearances(sessions, pageUrl);
+  const normalized = toSessionAndAppearances(sessions, pageUrl);
+
+  return {
+    ...normalized,
+    debugArtifact: {
+      url: pageUrl,
+      success: true,
+      rawPayload: payload,
+      extractedJson,
+      markdown,
+      html,
+      metadata,
+    },
+  };
 }

@@ -10,6 +10,7 @@ type MappingPanelMode =
   | "totalMapped"
   | "afterFilter"
   | "processed"
+  | "rawScrapes"
   | "conferenceSessions"
   | "uniqueSpeakers"
   | null;
@@ -282,6 +283,11 @@ export default function EventDetailPage() {
             onClick={() => setPanelMode("conferenceSessions")}
           />
           <CounterCard
+            label="Raw page scrapes"
+            value={event.latestJob.pageScrapes.length}
+            onClick={() => setPanelMode("rawScrapes")}
+          />
+          <CounterCard
             label="Unique speakers"
             value={event.latestJob.counters.uniqueSpeakersFound}
             onClick={() => setPanelMode("uniqueSpeakers")}
@@ -293,6 +299,7 @@ export default function EventDetailPage() {
             mappedUrls={event.latestJob.mappedUrls}
             filteredUrls={event.latestJob.filteredUrls}
             processedUrls={event.latestJob.processedUrls}
+            pageScrapes={event.latestJob.pageScrapes}
             sessions={event.sessions}
             speakers={event.speakers}
           />
@@ -390,6 +397,7 @@ function DebugPanel({
   mappedUrls,
   filteredUrls,
   processedUrls,
+  pageScrapes,
   sessions,
   speakers,
 }: {
@@ -397,9 +405,164 @@ function DebugPanel({
   mappedUrls: string[];
   filteredUrls: string[];
   processedUrls: string[];
+  pageScrapes: EventRecord["latestJob"]["pageScrapes"];
   sessions: EventRecord["sessions"];
   speakers: EventRecord["speakers"];
 }) {
+  const [selectedPageScrapeId, setSelectedPageScrapeId] = useState<string>("");
+  const panelTextRef = useRef<HTMLDivElement | null>(null);
+  const [copyLabel, setCopyLabel] = useState("Copy");
+
+  function stringifyForPanel(value: unknown): string {
+    if (value === undefined || value === null) {
+      return "";
+    }
+    if (typeof value === "string") {
+      return value;
+    }
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  }
+
+  if (mode === "rawScrapes") {
+    const selected =
+      pageScrapes.find((scrape) => scrape.id === selectedPageScrapeId) ?? pageScrapes[0];
+    const selectedText = selected
+      ? [
+          `URL: ${selected.url}`,
+          `Success: ${selected.success}`,
+          selected.error ? `Error: ${selected.error}` : "",
+          "",
+          "extractedJson",
+          stringifyForPanel(selected.extractedJson),
+          "",
+          "metadata",
+          stringifyForPanel(selected.metadata),
+          "",
+          "markdown",
+          selected.markdown ?? "",
+          "",
+          "html",
+          selected.html ?? "",
+          "",
+          "rawPayload",
+          stringifyForPanel(selected.rawPayload),
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : "";
+
+    return (
+      <div className="mt-4 rounded-md border border-zinc-200 bg-white p-3">
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Raw page scrapes</h3>
+          <button
+            type="button"
+            onClick={() => {
+              if (!selectedText.trim()) {
+                return;
+              }
+              void navigator.clipboard.writeText(selectedText);
+            }}
+            className="text-xs text-zinc-600 hover:underline"
+            disabled={!selected}
+          >
+            Copy selected
+          </button>
+        </div>
+        <p className="mb-2 text-xs text-zinc-600">Total: {pageScrapes.length}</p>
+        {pageScrapes.length === 0 ? (
+          <div className="rounded-md border bg-zinc-50 p-2">
+            <p className="text-sm text-zinc-600">No raw page scrape artifacts yet.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+            <div className="max-h-112 overflow-auto rounded-md border bg-zinc-50 p-2 lg:col-span-1">
+              <ul className="space-y-1 text-xs">
+                {pageScrapes.map((scrape, index) => (
+                  <li key={scrape.id}>
+                    <button
+                      type="button"
+                      className={`w-full rounded border px-2 py-1 text-left ${
+                        selected?.id === scrape.id
+                          ? "border-zinc-800 bg-zinc-100"
+                          : "border-zinc-200 bg-white hover:bg-zinc-100"
+                      }`}
+                      onClick={() => setSelectedPageScrapeId(scrape.id)}
+                    >
+                      <p className="font-medium">Page {index + 1}</p>
+                      <p className="truncate text-zinc-600">{scrape.url}</p>
+                      <p className={scrape.success ? "text-emerald-700" : "text-red-700"}>
+                        {scrape.success ? "Success" : "Failed"}
+                      </p>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="max-h-112 overflow-auto rounded-md border bg-zinc-50 p-2 lg:col-span-2">
+              {!selected ? (
+                <p className="text-sm text-zinc-600">Select a page to inspect raw scrape data.</p>
+              ) : (
+                <div className="space-y-3 text-xs text-zinc-700">
+                  <section>
+                    <h4 className="font-semibold">URL</h4>
+                    <p className="break-all">{selected.url}</p>
+                  </section>
+                  <section>
+                    <h4 className="font-semibold">Status</h4>
+                    <p>{selected.success ? "Success" : "Failed"}</p>
+                  </section>
+                  {selected.error ? (
+                    <section>
+                      <h4 className="font-semibold">Error</h4>
+                      <pre className="whitespace-pre-wrap wrap-break-word rounded border bg-white p-2">
+                        {selected.error}
+                      </pre>
+                    </section>
+                  ) : null}
+                  <section>
+                    <h4 className="font-semibold">Extracted JSON</h4>
+                    <pre className="whitespace-pre-wrap wrap-break-word rounded border bg-white p-2">
+                      {stringifyForPanel(selected.extractedJson) || "-"}
+                    </pre>
+                  </section>
+                  <section>
+                    <h4 className="font-semibold">Metadata</h4>
+                    <pre className="whitespace-pre-wrap wrap-break-word rounded border bg-white p-2">
+                      {stringifyForPanel(selected.metadata) || "-"}
+                    </pre>
+                  </section>
+                  <section>
+                    <h4 className="font-semibold">Markdown</h4>
+                    <pre className="whitespace-pre-wrap wrap-break-word rounded border bg-white p-2">
+                      {selected.markdown || "-"}
+                    </pre>
+                  </section>
+                  <section>
+                    <h4 className="font-semibold">HTML (raw text)</h4>
+                    <pre className="whitespace-pre-wrap wrap-break-word rounded border bg-white p-2">
+                      {selected.html || "-"}
+                    </pre>
+                  </section>
+                  <section>
+                    <h4 className="font-semibold">Raw payload</h4>
+                    <pre className="whitespace-pre-wrap wrap-break-word rounded border bg-white p-2">
+                      {stringifyForPanel(selected.rawPayload) || "-"}
+                    </pre>
+                  </section>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   const config: {
     title: string;
     emptyText: string;
@@ -455,9 +618,6 @@ function DebugPanel({
     config.type === "urlList" ? urls.length : Array.isArray(data) ? data.length : 0;
 
   const hasRows = total > 0;
-
-  const panelTextRef = useRef<HTMLDivElement | null>(null);
-  const [copyLabel, setCopyLabel] = useState("Copy");
 
   async function handleCopy(): Promise<void> {
     const fallbackText = panelTextRef.current?.innerText?.trim();

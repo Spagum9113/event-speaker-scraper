@@ -84,9 +84,26 @@ create table if not exists session_speakers (
   primary key (session_id, speaker_id)
 );
 
+create table if not exists job_page_scrapes (
+  id uuid primary key default gen_random_uuid(),
+  job_id uuid not null references jobs(id) on delete cascade,
+  event_id uuid not null references events(id) on delete cascade,
+  url text not null,
+  success boolean not null default false,
+  raw_payload jsonb,
+  extracted_json jsonb,
+  metadata jsonb,
+  markdown text,
+  html text,
+  error text,
+  created_at timestamptz not null default now()
+);
+
 create index if not exists events_created_at_desc_idx on events (created_at desc);
 create index if not exists jobs_event_created_idx on jobs (event_id, created_at desc);
 create index if not exists sessions_event_id_idx on sessions (event_id);
 create index if not exists speakers_event_id_idx on speakers (event_id);
 create index if not exists speakers_organization_id_idx on speakers (organization_id);
 create index if not exists organizations_normalized_name_idx on organizations (normalized_name);
+create index if not exists job_page_scrapes_job_id_idx on job_page_scrapes (job_id);
+create index if not exists job_page_scrapes_event_created_idx on job_page_scrapes (event_id, created_at desc);
