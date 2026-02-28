@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  appendEventJob,
   buildMockExtractionResult,
   getEventById,
-  upsertEvent,
 } from "@/lib/events-store";
 import { EventRecord } from "@/lib/types";
 
@@ -16,18 +16,54 @@ function formatDate(isoDate: string): string {
 
 export default function EventDetailPage() {
   const params = useParams<{ id: string }>();
-  // Route id is stable for this page lifecycle, so we can initialize once.
-  const [event, setEvent] = useState<EventRecord | null>(() =>
-    params.id ? (getEventById(params.id) ?? null) : null,
-  );
+  const [event, setEvent] = useState<EventRecord | null>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState("");
 
-  function runExtraction(): void {
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadEvent() {
+      if (!params.id) {
+        if (isMounted) {
+          setEvent(null);
+          setIsLoading(false);
+        }
+        return;
+      }
+
+      try {
+        const loadedEvent = await getEventById(params.id);
+        if (isMounted) {
+          setEvent(loadedEvent ?? null);
+          setError("");
+        }
+      } catch (loadError) {
+        if (isMounted) {
+          setError(loadError instanceof Error ? loadError.message : "Failed to load event.");
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    void loadEvent();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [params.id]);
+
+  async function runExtraction(): Promise<void> {
     if (!event || isRunning) {
       return;
     }
 
     setIsRunning(true);
+    setError("");
     const startedAt = new Date().toLocaleTimeString();
 
     // First update simulates the in-progress status the backend job will later drive.
@@ -44,19 +80,46 @@ export default function EventDetailPage() {
       },
     };
 
-    upsertEvent(inProgress);
-    setEvent(inProgress);
+    try {
+      await appendEventJob(event.id, inProgress.latestJob);
+      setEvent(inProgress);
+    } catch (runError) {
+      setError(
+        runError instanceof Error ? runError.message : "Could not start extraction.",
+      );
+      setIsRunning(false);
+      return;
+    }
 
-    window.setTimeout(() => {
+    window.setTimeout(async () => {
       const completed: EventRecord = {
         ...inProgress,
         latestJob: buildMockExtractionResult(inProgress.latestJob.logLines),
       };
 
-      upsertEvent(completed);
-      setEvent(completed);
+      try {
+        await appendEventJob(event.id, completed.latestJob);
+        const refreshed = await getEventById(event.id);
+        setEvent(refreshed ?? completed);
+      } catch (runError) {
+        setError(
+          runError instanceof Error ? runError.message : "Could not finalize extraction.",
+        );
+      }
+
       setIsRunning(false);
     }, 1200);
+  }
+
+  if (isLoading) {
+    return (
+      <main className="mx-auto max-w-4xl p-6">
+        <Link href="/events" className="text-sm text-zinc-600 hover:underline">
+          ← Back to Events
+        </Link>
+        <p className="mt-4 text-zinc-700">Loading event...</p>
+      </main>
+    );
   }
 
   if (!event) {
@@ -66,6 +129,7 @@ export default function EventDetailPage() {
           ← Back to Events
         </Link>
         <p className="mt-4 text-zinc-700">Event not found.</p>
+        {error ? <p className="mt-2 text-sm text-red-600">{error}</p> : null}
       </main>
     );
   }
@@ -83,7 +147,7 @@ export default function EventDetailPage() {
       <section className="mb-6 rounded-lg border p-4">
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <button
-            onClick={runExtraction}
+            onClick={() => void runExtraction()}
             disabled={isRunning}
             className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-zinc-400"
           >
@@ -97,6 +161,7 @@ export default function EventDetailPage() {
             Last updated: {formatDate(event.latestJob.updatedAt)}
           </span>
         </div>
+        {error ? <p className="mb-3 text-sm text-red-600">{error}</p> : null}
 
         <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 lg:grid-cols-4">
           <CounterCard

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import {
   deleteEventById,
   listEvents,
@@ -17,8 +17,9 @@ function formatDate(isoDate: string): string {
 
 export default function EventsPage() {
   const router = useRouter();
-  // Use a lazy initializer so we read storage once for the initial render.
-  const [events, setEvents] = useState<EventRecord[]>(() => listEvents());
+  const [events, setEvents] = useState<EventRecord[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [openMenuEventId, setOpenMenuEventId] = useState<string | null>(null);
   const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(
     null,
@@ -27,6 +28,36 @@ export default function EventsPage() {
   const [editName, setEditName] = useState("");
   const [editUrl, setEditUrl] = useState("");
   const [editError, setEditError] = useState("");
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadData() {
+      try {
+        const loadedEvents = await listEvents();
+        if (isMounted) {
+          setEvents(loadedEvents);
+          setLoadError("");
+        }
+      } catch (error) {
+        if (isMounted) {
+          setLoadError(
+            error instanceof Error ? error.message : "Failed to load events.",
+          );
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    void loadData();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   function handleEdit(eventRecord: EventRecord): void {
     // Use an inline modal instead of prompt() so editing is reliable and visible.
@@ -38,7 +69,7 @@ export default function EventsPage() {
     setMenuPosition(null);
   }
 
-  function handleDelete(eventRecord: EventRecord): void {
+  async function handleDelete(eventRecord: EventRecord): Promise<void> {
     const shouldDelete = window.confirm(
       `Delete "${eventRecord.name}"? This cannot be undone.`,
     );
@@ -46,13 +77,19 @@ export default function EventsPage() {
       return;
     }
 
-    deleteEventById(eventRecord.id);
+    try {
+      await deleteEventById(eventRecord.id);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Failed to delete event.");
+      return;
+    }
+
     setEvents((current) => current.filter((item) => item.id !== eventRecord.id));
     setOpenMenuEventId(null);
     setMenuPosition(null);
   }
 
-  function handleSaveEdit(event: FormEvent<HTMLFormElement>): void {
+  async function handleSaveEdit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
 
     if (!editTargetId) {
@@ -70,10 +107,16 @@ export default function EventsPage() {
       return;
     }
 
-    const updated = updateEventBasics(editTargetId, {
-      name: editName,
-      url: normalizedUrl,
-    });
+    let updated: EventRecord | undefined;
+    try {
+      updated = await updateEventBasics(editTargetId, {
+        name: editName,
+        url: normalizedUrl,
+      });
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : "Failed to update event.");
+      return;
+    }
 
     if (!updated) {
       setEditError("Could not update this event. Please try again.");
@@ -117,7 +160,19 @@ export default function EventsPage() {
             </tr>
           </thead>
             <tbody>
-            {events.length === 0 ? (
+            {isLoading ? (
+              <tr>
+                <td className="p-3 text-zinc-600" colSpan={5}>
+                  Loading events...
+                </td>
+              </tr>
+            ) : loadError ? (
+              <tr>
+                <td className="p-3 text-red-600" colSpan={5}>
+                  {loadError}
+                </td>
+              </tr>
+            ) : events.length === 0 ? (
               <tr>
                 <td className="p-3 text-zinc-600" colSpan={5}>
                   No events yet. Create your first one.
@@ -218,7 +273,7 @@ export default function EventsPage() {
                 if (!target) {
                   return;
                 }
-                handleDelete(target);
+                void handleDelete(target);
               }}
               className="block w-full rounded px-2 py-1 text-left text-sm text-red-600 hover:bg-red-50"
             >

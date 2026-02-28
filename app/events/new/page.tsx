@@ -11,8 +11,9 @@ export default function NewEventPage() {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  function onSubmit(event: FormEvent<HTMLFormElement>) {
+  async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
 
     // Small validation keeps user feedback fast before backend validation exists.
@@ -27,8 +28,18 @@ export default function NewEventPage() {
       return;
     }
 
-    const created = createEvent(name, normalizedUrl);
-    router.push(`/events/${created.id}`);
+    try {
+      setIsSubmitting(true);
+      const created = await createEvent(name, normalizedUrl);
+      router.push(`/events/${created.id}`);
+    } catch (submitError) {
+      setError(
+        submitError instanceof Error
+          ? submitError.message
+          : "Could not create event. Please try again.",
+      );
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -74,9 +85,10 @@ export default function NewEventPage() {
 
         <button
           type="submit"
-          className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700"
+          disabled={isSubmitting}
+          className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:cursor-not-allowed disabled:bg-zinc-400"
         >
-          Run Extraction
+          {isSubmitting ? "Creating..." : "Run Extraction"}
         </button>
       </form>
     </main>
