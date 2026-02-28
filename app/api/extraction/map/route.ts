@@ -7,6 +7,7 @@ import {
   updateJobByIdInDb,
 } from "@/lib/events-repository";
 import {
+  FirecrawlExtractionMode,
   filterLikelySessionUrls,
   mapEventUrlsWithFirecrawl,
   ScrapeDebugArtifact,
@@ -23,6 +24,47 @@ type MapRequestBody = {
 };
 
 const MAX_SESSION_PAGES = 20;
+const SPEAKER_PATH_KEYWORDS = ["speaker", "speakers", "presenter", "presenters", "faculty"];
+const SESSION_PATH_KEYWORDS = ["session", "sessions", "agenda", "schedule", "program"];
+const SPEAKER_SIGNAL_TOKENS = ["speaker", "speakers", "presenter", "presenters", "faculty"];
+
+function pickExtractionMode(url: string): {
+  mode: FirecrawlExtractionMode;
+  isAmbiguous: boolean;
+} {
+  try {
+    const parsed = new URL(url);
+    const candidate = `${parsed.pathname}${parsed.search}`.toLowerCase();
+    const hasSpeakerKeyword = SPEAKER_PATH_KEYWORDS.some((keyword) =>
+      candidate.includes(keyword),
+    );
+    const hasSessionKeyword = SESSION_PATH_KEYWORDS.some((keyword) =>
+      candidate.includes(keyword),
+    );
+
+    if (hasSpeakerKeyword && !hasSessionKeyword) {
+      return { mode: "speakerDirectory", isAmbiguous: false };
+    }
+    if (hasSessionKeyword && !hasSpeakerKeyword) {
+      return { mode: "session", isAmbiguous: false };
+    }
+  } catch {
+    // Step 3: Fall back to default mode when URL parsing fails.
+  }
+
+  return { mode: "session", isAmbiguous: true };
+}
+
+function hasSpeakerSignals(artifact: ScrapeDebugArtifact): boolean {
+  const markdown = artifact.markdown?.toLowerCase() ?? "";
+  const html = artifact.html?.toLowerCase() ?? "";
+  const extractedJsonText =
+    artifact.extractedJson !== undefined ? JSON.stringify(artifact.extractedJson).toLowerCase() : "";
+  return SPEAKER_SIGNAL_TOKENS.some(
+    (token) =>
+      markdown.includes(token) || html.includes(token) || extractedJsonText.includes(token),
+  );
+}
 
 export async function POST(request: Request) {
   let jobId: string | null = null;
@@ -113,13 +155,37 @@ export async function POST(request: Request) {
       if (request.signal.aborted) {
         throw new Error("Extraction cancelled.");
       }
+      const modeSelection = pickExtractionMode(sessionUrl);
 
       try {
-        const structured = await scrapeStructuredSessionPage(sessionUrl, request.signal);
+        appendLogLine(
+          `Mode selected for ${sessionUrl}: ${modeSelection.mode}${modeSelection.isAmbiguous ? " (ambiguous)" : ""}.`,
+        );
+        const firstPass = await scrapeStructuredSessionPage(sessionUrl, request.signal, {
+          extractionMode: modeSelection.mode,
+        });
+        scrapeArtifacts.push(firstPass.debugArtifact);
+
+        let chosenResult = firstPass;
+        if (
+          modeSelection.isAmbiguous &&
+          modeSelection.mode === "session" &&
+          firstPass.appearances.length === 0 &&
+          hasSpeakerSignals(firstPass.debugArtifact)
+        ) {
+          appendLogLine(`Retrying ${sessionUrl} with speakerDirectory mode.`);
+          const retryPass = await scrapeStructuredSessionPage(sessionUrl, request.signal, {
+            extractionMode: "speakerDirectory",
+          });
+          scrapeArtifacts.push(retryPass.debugArtifact);
+          if (retryPass.appearances.length > 0) {
+            chosenResult = retryPass;
+          }
+        }
+
         processedUrls.push(sessionUrl);
-        extractedSessions.push(...structured.sessions);
-        extractedAppearances.push(...structured.appearances);
-        scrapeArtifacts.push(structured.debugArtifact);
+        extractedSessions.push(...chosenResult.sessions);
+        extractedAppearances.push(...chosenResult.appearances);
         appendLogLine(`Processed page ${processedUrls.length}/${targetedSessionUrls.length}: ${sessionUrl}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown scrape error.";
@@ -129,6 +195,11 @@ export async function POST(request: Request) {
           success: false,
           rawPayload: null,
           extractedJson: null,
+          extractionMode: modeSelection.mode,
+          metadata: {
+            extractionMode: modeSelection.mode,
+            ambiguousModeSelection: modeSelection.isAmbiguous,
+          },
           error: message,
         });
         appendLogLine(`Scrape failed for ${sessionUrl}.`);
